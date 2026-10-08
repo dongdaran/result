@@ -1,0 +1,17 @@
+#!/usr/bin/env -S uv run -s
+# /// script
+# requires-python = ">=3.11,<3.13"
+# dependencies = []
+# ///
+"""Run the project command independently of the caller's working directory."""
+
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+
+from hb_steering.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main(["--root", str(ROOT), 'summarize', *sys.argv[1:]]))
