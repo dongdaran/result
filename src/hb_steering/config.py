@@ -35,13 +35,20 @@ def load_config(root: Path, path: str | None = None) -> tuple[dict, Path]:
         raise ValueError("dataset.categories must be nonempty and unique")
     if type(dataset["seed"]) is not int:
         raise ValueError("dataset.seed must be an integer")
-    ratios = dataset["ratios"]
+    if type(dataset.get("n_folds")) is not int or not 2 <= dataset["n_folds"] <= 10:
+        raise ValueError("dataset.n_folds must be an integer between 2 and 10")
+    if "ratios" in dataset:
+        raise ValueError("Replace dataset.ratios with n_folds and benign_ratios")
+    ratios = dataset["benign_ratios"]
     if (
         len(ratios) != 3
-        or any(not math.isfinite(x) or x <= 0 for x in ratios)
+        or any(
+            isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x <= 0
+            for x in ratios
+        )
         or not math.isclose(sum(ratios), 1.0)
     ):
-        raise ValueError("dataset.ratios must be three positive values summing to 1")
+        raise ValueError("dataset.benign_ratios must be three positive values summing to 1")
     runtime = config["runtime"]
     if runtime["device"] not in {"cuda", "cpu"}:
         raise ValueError("runtime.device must be cuda/cpu")

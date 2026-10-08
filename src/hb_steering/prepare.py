@@ -8,7 +8,7 @@ import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from .data import download_harmbench, load_behaviors, load_labels, make_splits, validate_splits
+from .data import download_harmbench, load_behaviors, load_labels, make_folds, validate_folds
 from .storage import atomic_bytes, atomic_json, file_digest, fingerprint, run_lock
 
 
@@ -113,21 +113,28 @@ def prepare_dataset(root: Path, config: dict, *, resplit: bool = False) -> dict:
         path = root / ds["splits_path"]
         if path.exists() and not resplit:
             saved = json.loads(path.read_text())
+            if saved.get("schema_version") != 2:
+                raise ValueError(
+                    "Saved split schema changed to grouped OOF; use ./scripts/download --resplit"
+                )
             if saved.get("fingerprint") != fingerprint(signature):
                 raise ValueError(
                     "Data/labels/split settings changed; use ./scripts/download --resplit"
                 )
-            validate_splits(records, labels, saved["harmbench"])
+            validate_folds(records, labels, saved.get("harmbench"))
+            if saved["harmbench"]["n_folds"] != ds["n_folds"]:
+                raise ValueError("Saved fold count differs from config; run ./scripts/download --resplit")
         else:
             saved = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "fingerprint": fingerprint(signature),
                 "provenance": signature,
-                "harmbench": make_splits(records, labels, ds["seed"], tuple(ds["ratios"])),
-                "benign": benign_splits(benign, ds["seed"], ds["ratios"]),
+                "harmbench": make_folds(records, labels, ds["n_folds"], ds["seed"]),
+                "benign": benign_splits(benign, ds["seed"], ds["benign_ratios"]),
             }
+            validate_benign_splits(benign, saved["benign"])
             atomic_json(path, saved)
-        validate_benign_splits(benign, saved["benign"])
+        validate_benign_splits(benign, saved.get("benign"))
         atomic_bytes(
             root / "data/processed/harmbench.jsonl",
             b"".join(
@@ -142,13 +149,31 @@ def prepare_dataset(root: Path, config: dict, *, resplit: bool = False) -> dict:
             b"".join((json.dumps(r, ensure_ascii=False) + "\n").encode() for r in benign),
         )
         summary = {
+            "schema_version": saved["schema_version"],
             "fingerprint": saved["fingerprint"],
             "harmbench_total": len(records),
             "level_counts": dict(sorted(Counter(labels.values()).items())),
-            "harmbench_splits": {
-                s: dict(sorted(Counter(labels[i] for i in ids).items()))
-                for s, ids in saved["harmbench"].items()
-            },
+            "n_folds": saved["harmbench"]["n_folds"],
+            "group_count": len(set(saved["harmbench"]["group_ids"].values())),
+            "harmbench_folds": [
+                {
+                    "fold": fold["fold"],
+                    **{
+                        split: dict(sorted(Counter(labels[item] for item in fold[split]).items()))
+                        for split in ("fit", "test")
+                    },
+                }
+                for fold in saved["harmbench"]["folds"]
+            ],
+            "pooled_test_counts": dict(
+                sorted(
+                    Counter(
+                        labels[item]
+                        for fold in saved["harmbench"]["folds"]
+                        for item in fold["test"]
+                    ).items()
+                )
+            ),
             "benign_total": len(benign),
             "benign_splits": {s: len(ids) for s, ids in saved["benign"].items()},
         }
@@ -157,8 +182,13 @@ def prepare_dataset(root: Path, config: dict, *, resplit: bool = False) -> dict:
 
 
 def validate_benign_splits(records: list[dict], splits: dict) -> None:
-    if set(splits) != {"fit", "dev", "test"}:
+    if not isinstance(splits, dict) or set(splits) != {"fit", "dev", "test"}:
         raise ValueError("Invalid benign split names")
+    if any(
+        not isinstance(values, list) or any(not isinstance(item, str) for item in values)
+        for values in splits.values()
+    ):
+        raise ValueError("Benign split IDs must be lists of benign ID strings")
     ids = [key for values in splits.values() for key in values]
     if len(ids) != len(set(ids)) or set(ids) != {r["benign_id"] for r in records}:
         raise ValueError("Benign split IDs overlap or do not cover the dataset")
@@ -173,13 +203,15 @@ def read_prepared(root: Path, config: dict) -> tuple[list[dict], dict, list[dict
     if not path.exists():
         raise ValueError("Missing splits; run ./scripts/download first")
     saved = json.loads(path.read_text())
-    if saved.get("schema_version") != 1 or saved.get("fingerprint") != fingerprint(signature):
+    if saved.get("schema_version") != 2 or saved.get("fingerprint") != fingerprint(signature):
         raise ValueError("Saved splits differ from data/config; run ./scripts/download --resplit")
     records = load_behaviors(
         root / "data/raw/harmbench_behaviors_text_all.csv", tuple(ds["categories"])
     )
     labels = load_labels(root / ds["labels_path"], records)
-    validate_splits(records, labels, saved["harmbench"])
+    validate_folds(records, labels, saved.get("harmbench"))
+    if saved["harmbench"]["n_folds"] != ds["n_folds"]:
+        raise ValueError("Saved fold count differs from config; run ./scripts/download --resplit")
     benign = load_benign(root / "data/raw/xstest_prompts.csv")
-    validate_benign_splits(benign, saved["benign"])
+    validate_benign_splits(benign, saved.get("benign"))
     return records, labels, benign, saved

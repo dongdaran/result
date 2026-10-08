@@ -1,5 +1,6 @@
 """Data integrity checks use harmless fixtures and never require the network."""
 
+import copy
 import csv
 import hashlib
 import io
@@ -11,10 +12,13 @@ from urllib.error import HTTPError, URLError
 
 from hb_steering.data import (
     OFFICIAL_COLUMNS,
+    behavior_groups,
     download_harmbench,
     load_behaviors,
     load_labels,
+    make_folds,
     make_splits,
+    validate_folds,
     validate_splits,
     write_label_template,
 )
@@ -154,6 +158,100 @@ class DataTests(unittest.TestCase):
         for ids in splits.values():
             self.assertEqual({labels[item] for item in ids}, {1, 2, 3})
         validate_splits(records, labels, splits)
+
+    def test_oof_folds_cover_each_behavior_once_and_fit_is_heldout_complement(self):
+        records, labels = split_fixture()
+        saved = make_folds(records, labels)
+        self.assertEqual(saved["n_folds"], 5)
+        self.assertEqual(saved, make_folds(list(reversed(records)), dict(reversed(labels.items()))))
+        self.assertNotEqual(saved, make_folds(records, labels, seed=100))
+        tests = [item for fold in saved["folds"] for item in fold["test"]]
+        self.assertEqual(sorted(tests), sorted(labels))
+        self.assertEqual(len(tests), len(set(tests)))
+        for fold in saved["folds"]:
+            self.assertEqual(set(fold["fit"]), set(labels) - set(fold["test"]))
+            self.assertEqual({labels[item] for item in fold["fit"]}, {1, 2, 3})
+            self.assertEqual({labels[item] for item in fold["test"]}, {1, 2, 3})
+            self.assertNotIn("dev", fold)
+        owners = {item: fold["fold"] for fold in saved["folds"] for item in fold["test"]}
+        self.assertEqual(owners["duplicate"], owners["l1-0"])
+        self.assertEqual(saved["group_ids"]["duplicate"], saved["group_ids"]["l1-0"])
+
+    def test_oof_shared_context_groups_are_transitive_and_paraphrases_are_not_claimed(self):
+        records, labels = split_fixture()
+        by_id = {record["behavior_id"]: record for record in records}
+        by_id["duplicate"]["context"] = "Shared context A"
+        by_id["l2-0"]["context"] = "  SHARED\ncontext A "
+        by_id["l1-0"]["context"] = "Shared context B"
+        by_id["l3-0"]["context"] = "Shared context B"
+        # Similar meaning alone is deliberately not treated as exact duplication.
+        records.append(
+            {"behavior_id": "paraphrase", "behavior": "A safely reworded item zero", "context": ""}
+        )
+        labels["paraphrase"] = 1
+        saved = make_folds(records, labels)
+        component = next(
+            group for group in behavior_groups(records, labels) if "duplicate" in group
+        )
+        self.assertEqual(set(component), {"duplicate", "l1-0", "l2-0", "l3-0"})
+        self.assertNotIn("paraphrase", component)
+        self.assertEqual(len({saved["group_ids"][item] for item in component}), 1)
+        owners = {item: fold["fold"] for fold in saved["folds"] for item in fold["test"]}
+        self.assertEqual(len({owners[item] for item in component}), 1)
+
+    def test_oof_rejects_missing_levels_invalid_counts_and_impossible_group_coverage(self):
+        records, labels = split_fixture()
+        for count in (True, 0, 1, 11, 5.0):
+            with self.subTest(n_folds=count), self.assertRaisesRegex(ValueError, "n_folds"):
+                make_folds(records, labels, n_folds=count)
+        with self.assertRaisesRegex(ValueError, "seed"):
+            make_folds(records, labels, seed=True)
+        saved = make_folds(records, labels)
+        fold = saved["folds"][0]
+        moved = [item for item in fold["test"] if labels[item] == 1]
+        fold["test"] = [item for item in fold["test"] if item not in moved]
+        fold["fit"].extend(moved)
+        with self.assertRaisesRegex(ValueError, "all three severity levels"):
+            validate_folds(records, labels, saved)
+        for record in records:
+            if labels[record["behavior_id"]] == 1:
+                record["context"] = "One shared level-one context"
+        with self.assertRaisesRegex(ValueError, "coverage impossible"):
+            make_folds(records, labels)
+
+    def test_oof_validation_rejects_corrupt_structure_and_crossfold_duplicate_leakage(self):
+        records, labels = split_fixture()
+        valid = make_folds(records, labels)
+        cases = []
+        saved = copy.deepcopy(valid)
+        saved["folds"][0]["fit"].remove(saved["folds"][0]["fit"][0])
+        cases.append((saved, "exact complement"))
+        saved = copy.deepcopy(valid)
+        saved["folds"][0]["test"].append(saved["folds"][0]["test"][0])
+        cases.append((saved, "more than once"))
+        saved = copy.deepcopy(valid)
+        saved["group_ids"]["duplicate"] = "incorrect-group"
+        cases.append((saved, "group IDs"))
+        saved = copy.deepcopy(valid)
+        saved["folds"][0]["fold"] = 2
+        cases.append((saved, "fold numbers"))
+        saved = copy.deepcopy(valid)
+        saved["folds"][0]["test"].append("unknown-id")
+        cases.append((saved, "Unknown behavior ID"))
+        saved = copy.deepcopy(valid)
+        origin = next(fold for fold in saved["folds"] if "duplicate" in fold["test"])
+        target = next(fold for fold in saved["folds"] if fold is not origin)
+        swap = next(item for item in target["test"] if labels[item] == 1)
+        origin["test"].remove("duplicate")
+        origin["test"].append(swap)
+        target["test"].remove(swap)
+        target["test"].append("duplicate")
+        for fold in saved["folds"]:
+            fold["fit"] = sorted(set(labels) - set(fold["test"]))
+        cases.append((saved, "leaks between folds"))
+        for saved, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                validate_folds(records, labels, saved)
 
     def test_insufficient_groups_and_conflicting_duplicate_labels_rejected(self):
         records, labels = split_fixture()

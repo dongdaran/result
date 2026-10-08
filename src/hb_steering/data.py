@@ -1,4 +1,4 @@
-"""Pinned HarmBench ingestion, explicit labels, and leakage-safe data splits.
+"""Pinned HarmBench ingestion, explicit labels, and grouped OOF data folds.
 
 The downloaded CSV remains unchanged. Severity levels are project annotations,
 not HarmBench categories; this module never infers or fabricates those labels.
@@ -274,11 +274,140 @@ def _groups(records: list[dict], labels: dict[str, int]) -> list[list[str]]:
     return sorted(groups.values())
 
 
+def behavior_groups(records: list[dict], labels: dict[str, int]) -> list[list[str]]:
+    """Return stable connected components for normalized text/shared context.
+
+    This catches exact duplicates after Unicode/case/whitespace normalization;
+    it does not claim to detect semantic paraphrases.
+    """
+    return _groups(records, labels)
+
+
+def _validate_fold_count(n_folds: int) -> None:
+    if type(n_folds) is not int or not 2 <= n_folds <= 10:
+        raise ValueError("n_folds must be an integer between 2 and 10")
+
+
+def make_folds(
+    records: list[dict],
+    labels: dict[str, int],
+    n_folds: int = 5,
+    seed: int = 42,
+) -> dict:
+    """Build deterministic grouped, approximately stratified OOF folds.
+
+    Every behavior is held out once. Each fold's fit is the exact complement
+    of its held-out test IDs; no inner dev set or test-based tuning is implied.
+    Both fit and test contain all three severity levels. Large shared-context
+    groups can prevent exactly equal row counts, so grouping takes priority.
+    """
+    _validate_fold_count(n_folds)
+    if type(seed) is not int:
+        raise ValueError("Fold seed must be an integer")
+    groups = behavior_groups(records, labels)
+    rng = random.Random(seed)
+    by_mask = {mask: [] for mask in range(1, 8)}
+    for group in groups:
+        mask = 0
+        for item in group:
+            mask |= 1 << (labels[item] - 1)
+        by_mask[mask].append(group)
+    for mask_groups in by_mask.values():
+        rng.shuffle(mask_groups)
+        mask_groups.sort(key=len, reverse=True)
+    anchors = _coverage_anchors(tuple(len(by_mask[mask]) for mask in range(1, 8)), n_folds)
+    test_ids = [[] for _ in range(n_folds)]
+    counts = [[0, 0, 0] for _ in range(n_folds)]
+
+    def assign(fold, group):
+        test_ids[fold].extend(group)
+        for item in group:
+            counts[fold][labels[item] - 1] += 1
+
+    for fold, mask in anchors:
+        assign(fold, by_mask[mask].pop())
+    targets = [sum(value == level for value in labels.values()) / n_folds for level in (1, 2, 3)]
+    remaining = [group for mask_groups in by_mask.values() for group in mask_groups]
+    rng.shuffle(remaining)
+    remaining.sort(key=len, reverse=True)
+    for group in remaining:
+        contribution = [sum(labels[item] == level for item in group) for level in (1, 2, 3)]
+
+        def cost(fold):
+            return sum(
+                (
+                    (counts[fold][level] + contribution[level] - targets[level]) ** 2
+                    - (counts[fold][level] - targets[level]) ** 2
+                )
+                / max(targets[level], 1.0)
+                for level in range(3)
+            )
+
+        assign(min(range(n_folds), key=lambda fold: (cost(fold), fold)), group)
+    all_ids = set(labels)
+    result = {
+        "n_folds": n_folds,
+        "folds": [
+            {"fold": index + 1, "fit": sorted(all_ids - set(ids)), "test": sorted(ids)}
+            for index, ids in enumerate(test_ids)
+        ],
+        "group_ids": {item: group[0] for group in groups for item in group},
+    }
+    validate_folds(records, labels, result)
+    return result
+
+
+def validate_folds(records: list[dict], labels: dict[str, int], harmbench: dict) -> None:
+    """Validate fold structure, held-out coverage, grouping, and fit complements."""
+    groups = behavior_groups(records, labels)
+    if not isinstance(harmbench, dict) or set(harmbench) != {"n_folds", "folds", "group_ids"}:
+        raise ValueError("HarmBench folds require n_folds, folds, and group_ids")
+    n_folds = harmbench["n_folds"]
+    _validate_fold_count(n_folds)
+    folds = harmbench["folds"]
+    if not isinstance(folds, list) or len(folds) != n_folds:
+        raise ValueError("HarmBench fold count does not match n_folds")
+    expected_groups = {item: group[0] for group in groups for item in group}
+    if harmbench["group_ids"] != expected_groups:
+        raise ValueError("HarmBench group IDs differ from normalized behavior/context groups")
+    all_ids = set(labels)
+    test_owners = {}
+    for number, fold in enumerate(folds, start=1):
+        if (
+            not isinstance(fold, dict)
+            or set(fold) != {"fold", "fit", "test"}
+            or type(fold["fold"]) is not int
+            or fold["fold"] != number
+        ):
+            raise ValueError("HarmBench folds must have unique ordered fold numbers starting at 1")
+        for name in ("fit", "test"):
+            ids = fold[name]
+            if not isinstance(ids, list) or any(not isinstance(item, str) for item in ids):
+                raise ValueError("Fold IDs must be lists of behavior ID strings")
+            if len(ids) != len(set(ids)):
+                raise ValueError(f"Behavior ID occurs more than once in fold {number} {name}")
+            if not set(ids) <= all_ids:
+                raise ValueError(f"Unknown behavior ID in fold {number} {name}")
+            if {labels[item] for item in ids} != {1, 2, 3}:
+                raise ValueError(f"Fold {number} {name} must contain all three severity levels")
+        if set(fold["fit"]) != all_ids - set(fold["test"]):
+            raise ValueError(f"Fold {number} fit must be the exact complement of its test IDs")
+        for item in fold["test"]:
+            if item in test_owners:
+                raise ValueError("Behavior ID is held out more than once across folds")
+            test_owners[item] = number
+    if set(test_owners) != all_ids:
+        raise ValueError("OOF test folds must cover every labeled behavior exactly once")
+    for group in groups:
+        if len({test_owners[item] for item in group}) != 1:
+            raise ValueError("Duplicate behavior text or shared context leaks between folds")
+
+
 def _coverage_anchors(mask_counts: tuple[int, ...], split_count: int) -> list[tuple[int, int]]:
     """Find a small exact assignment giving each split all severity levels.
 
     Only the seven possible level-presence masks matter to coverage, so this
-    bounded search needs at most nine assignments even for a large dataset.
+    bounded search needs at most three assignments per split/fold.
     """
     failed = set()
 

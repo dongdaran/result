@@ -9,7 +9,10 @@ categories = ["standard", "contextual"]
 labels_path = "data/annotations/severity.csv"
 splits_path = "data/splits/splits.json"
 seed = 42
-ratios = [0.6, 0.2, 0.2]
+# HarmBench: grouped OOF evaluation; each behavior is held out once.
+n_folds = 5
+# External XSTest safe reference: the same benign fit set is used in every fold.
+benign_ratios = [0.6, 0.2, 0.2]
 
 # Fill these later. A full commit SHA is required for GPU runs.
 # ./scripts/pin-models resolves the configured HF IDs to commit SHAs.

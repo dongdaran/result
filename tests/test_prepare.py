@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hb_steering.config import load_config
-from hb_steering.data import OFFICIAL_COLUMNS
+from hb_steering.data import OFFICIAL_COLUMNS, make_folds
 from hb_steering.prepare import (
     benign_splits,
     checked_download,
@@ -88,7 +88,8 @@ class PrepareTests(unittest.TestCase):
                 "labels_path": "data/annotations/severity.csv",
                 "splits_path": "data/splits/splits.json",
                 "seed": 42,
-                "ratios": [0.6, 0.2, 0.2],
+                "n_folds": 3,
+                "benign_ratios": [0.6, 0.2, 0.2],
             }
         }
 
@@ -117,12 +118,20 @@ class PrepareTests(unittest.TestCase):
             benign_open.assert_called_once()
         self.assertEqual(summary["harmbench_total"], 9)
         self.assertEqual(summary["level_counts"], {1: 3, 2: 3, 3: 3})
+        self.assertEqual(summary["schema_version"], 2)
+        self.assertEqual(summary["n_folds"], 3)
+        self.assertEqual(summary["pooled_test_counts"], {1: 3, 2: 3, 3: 3})
+        self.assertEqual(len(summary["harmbench_folds"]), 3)
+        for fold in summary["harmbench_folds"]:
+            self.assertEqual(fold["fit"], {1: 2, 2: 2, 3: 2})
+            self.assertEqual(fold["test"], {1: 1, 2: 1, 3: 1})
         self.assertEqual(summary["benign_total"], 20)
         self.assertEqual(summary["benign_splits"], {"fit": 12, "dev": 4, "test": 4})
         records, labels, benign, saved = read_prepared(self.root, self.config)
         self.assertEqual(len(records), len(labels))
         self.assertEqual(len(benign), 20)
         self.assertEqual(saved["fingerprint"], summary["fingerprint"])
+        self.assertEqual(saved["schema_version"], 2)
         self.assertEqual(saved["provenance"]["dataset_config"], self.config["dataset"])
         self.assertEqual(
             saved["provenance"]["labels_sha256"],
@@ -158,6 +167,44 @@ class PrepareTests(unittest.TestCase):
         self.config["dataset"]["seed"] = 123
         with self.assertRaisesRegex(ValueError, "changed.*resplit"):
             prepare_dataset(self.root, self.config)
+
+    def test_schema_one_requires_explicit_resplit_even_when_fingerprint_matches(self):
+        with self.mock_downloads():
+            prepare_dataset(self.root, self.config)
+        path = self.root / self.config["dataset"]["splits_path"]
+        saved = json.loads(path.read_text())
+        saved["schema_version"] = 1
+        path.write_text(json.dumps(saved))
+        with self.assertRaisesRegex(ValueError, "schema changed.*resplit"):
+            prepare_dataset(self.root, self.config)
+        with self.assertRaisesRegex(ValueError, "differ.*resplit"):
+            read_prepared(self.root, self.config)
+        summary = prepare_dataset(self.root, self.config, resplit=True)
+        self.assertEqual(summary["schema_version"], 2)
+
+    def test_modified_fold_structure_rejected_with_unchanged_fingerprint(self):
+        with self.mock_downloads():
+            prepare_dataset(self.root, self.config)
+        path = self.root / self.config["dataset"]["splits_path"]
+        saved = json.loads(path.read_text())
+        saved["harmbench"]["folds"][0]["fit"].pop()
+        path.write_text(json.dumps(saved))
+        with self.assertRaisesRegex(ValueError, "exact complement"):
+            prepare_dataset(self.root, self.config)
+        with self.assertRaisesRegex(ValueError, "exact complement"):
+            read_prepared(self.root, self.config)
+
+    def test_valid_alternate_fold_count_cannot_bypass_config_with_unchanged_fingerprint(self):
+        with self.mock_downloads():
+            prepare_dataset(self.root, self.config)
+        records, labels, _, saved = read_prepared(self.root, self.config)
+        saved["harmbench"] = make_folds(records, labels, n_folds=2)
+        path = self.root / self.config["dataset"]["splits_path"]
+        path.write_text(json.dumps(saved))
+        with self.assertRaisesRegex(ValueError, "fold count differs.*resplit"):
+            prepare_dataset(self.root, self.config)
+        with self.assertRaisesRegex(ValueError, "fold count differs.*resplit"):
+            read_prepared(self.root, self.config)
 
     def test_corrupt_raw_cache_and_wrong_source_revision_are_rejected(self):
         with self.mock_downloads():
@@ -262,6 +309,12 @@ class PrepareTests(unittest.TestCase):
         config, resolved = load_config(self.root, "config.toml")
         self.assertEqual(resolved, path)
         self.assertEqual(config["models"]["model_1"]["hf_id"], "")
+        self.assertEqual(config["dataset"]["n_folds"], 5)
+        self.assertEqual(config["dataset"]["benign_ratios"], [0.6, 0.2, 0.2])
+        for value in ("true", "1", "11", "5.0"):
+            path.write_text(text.replace("n_folds = 5", f"n_folds = {value}"))
+            with self.subTest(n_folds=value), self.assertRaisesRegex(ValueError, "n_folds"):
+                load_config(self.root, "config.toml")
         path.write_text(
             text.replace('categories = ["standard", "contextual"]', 'categories = ["multimodal"]')
         )

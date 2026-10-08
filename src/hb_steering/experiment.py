@@ -40,18 +40,23 @@ def selected_records(records: list[dict], labels: dict, ids: list[str], limit: i
     return selected
 
 
-def plan_jobs(records: list[dict], labels: dict, layers: list[int]) -> list[dict]:
+def plan_jobs(
+    records: list[dict], labels: dict, layers: list[int], fold: int | None = None
+) -> list[dict]:
     jobs = []
     for record in records:
         ident = record["behavior_id"]
         base = {"behavior_id": ident, "target_level": labels[ident]}
-        jobs.append({**base, "key": f"baseline:{ident}", "source_level": 0, "layer": None})
+        prefix = "" if fold is None else f"fold:{fold}:"
+        if fold is not None:
+            base["fold"] = fold
+        jobs.append({**base, "key": f"{prefix}baseline:{ident}", "source_level": 0, "layer": None})
         for source in (1, 2, 3):
             for layer in layers:
                 jobs.append(
                     {
                         **base,
-                        "key": f"steered:{source}:{layer}:{ident}",
+                        "key": f"{prefix}steered:{source}:{layer}:{ident}",
                         "source_level": source,
                         "layer": layer,
                     }
@@ -65,17 +70,18 @@ def setup_run(
     config_path: Path,
     model_key: str,
     run_id: str,
-    split: str,
+    fold: int | None,
     limit: int | None,
 ) -> dict:
     safe_name(model_key)
     safe_name(run_id)
     require_model(config, model_key)
-    if split not in {"dev", "test"} or (limit is not None and limit <= 0):
-        raise ValueError("Use split dev/test and a positive limit-per-level")
+    if limit is not None and (type(limit) is not int or limit <= 0):
+        raise ValueError("Use a positive limit-per-level")
     records, labels, benign, saved = read_prepared(root, config)
-    fit = selected_records(records, labels, saved["harmbench"]["fit"], limit)
-    evaluation = selected_records(records, labels, saved["harmbench"][split], limit)
+    fold_ids = [entry["fold"] for entry in saved["harmbench"]["folds"]]
+    if fold is not None and (type(fold) is not int or fold not in fold_ids):
+        raise ValueError(f"Select --fold from {fold_ids}")
     benign_ids = set(saved["benign"]["fit"])
     benign_fit = sorted(
         (r for r in benign if r["benign_id"] in benign_ids), key=lambda r: r["benign_id"]
@@ -87,12 +93,16 @@ def setup_run(
         for p in sorted((root / "src/hb_steering").glob("*.py"))
     }
     run_spec = {
-        "schema_version": 1,
+        "schema_version": 2,
         "config": config,
         "dataset_fingerprint": saved["fingerprint"],
         "splits_sha256": file_digest(root / config["dataset"]["splits_path"]),
         "code_sha256": fingerprint(code),
-        "evaluation_split": split,
+        "evaluation_protocol": "grouped_kfold_out_of_fold",
+        "n_folds": len(fold_ids),
+        "dependency_lock_sha256": file_digest(root / "uv.lock")
+        if (root / "uv.lock").exists()
+        else None,
         "limit_per_level": limit,
     }
     directory = root / "outputs" / run_id
@@ -106,18 +116,39 @@ def setup_run(
             atomic_bytes(directory / "config.toml", config_path.read_bytes())
             atomic_json(directory / "effective_config.json", config)
             atomic_json(directory / "code_hashes.json", code)
-    return {
+    model_fingerprint = fingerprint({**run_spec, "model_key": model_key})
+    common = {
         "root": root,
         "directory": directory / model_key,
         "config": config,
         "model_key": model_key,
         "records": records,
         "labels": labels,
-        "fit": fit,
-        "evaluation": evaluation,
         "benign_fit": benign_fit,
-        "jobs": plan_jobs(evaluation, labels, config["steering"]["layers"]),
-        "fingerprint": fingerprint({**run_spec, "model_key": model_key}),
+        "group_ids": saved["harmbench"]["group_ids"],
+        "limit_per_level": limit,
+        "fingerprint": model_fingerprint,
+    }
+    fold_runs = []
+    for entry in saved["harmbench"]["folds"]:
+        index = entry["fold"]
+        evaluation = selected_records(records, labels, entry["test"], limit)
+        fold_runs.append(
+            {
+                **common,
+                "directory": common["directory"] / f"fold_{index}",
+                "fold": index,
+                "fit": selected_records(records, labels, entry["fit"], limit),
+                "evaluation": evaluation,
+                "jobs": plan_jobs(evaluation, labels, config["steering"]["layers"], index),
+                "fingerprint": fingerprint({"model_fingerprint": model_fingerprint, "fold": index}),
+            }
+        )
+    return {
+        **common,
+        "all_fold_runs": fold_runs,
+        "fold_runs": [run for run in fold_runs if fold is None or run["fold"] == fold],
+        "selected_fold": fold,
     }
 
 
@@ -159,6 +190,8 @@ def _load_vectors(run: dict, runner=None) -> dict:
     payload = load_vectors(path, expected_model=expected)
     if payload.get("run_fingerprint") != run["fingerprint"]:
         raise ValueError("Vector artifact belongs to a different run")
+    if "fold" in run and payload.get("fold") != run["fold"]:
+        raise ValueError("Vector artifact fold identity differs from the requested fold")
     if payload.get("requested_layers") != run["config"]["steering"]["layers"] or set(
         payload["vectors"]
     ) != {1, 2, 3}:
@@ -210,6 +243,8 @@ def extract(run: dict, runner=None) -> dict:
         )
         payload["run_fingerprint"] = run["fingerprint"]
         payload["requested_layers"] = run["config"]["steering"]["layers"]
+        if "fold" in run:
+            payload["fold"] = run["fold"]
         save_vectors(payload, path)
         return _load_vectors(run, runner)
     finally:
@@ -367,7 +402,15 @@ def score(run: dict, judge=None) -> dict:
 
 
 def _validate_score(row: dict, generation: dict, run: dict):
-    fields = ("key", "behavior_id", "target_level", "source_level", "layer", "generation_sha256")
+    fields = (
+        "key",
+        "fold",
+        "behavior_id",
+        "target_level",
+        "source_level",
+        "layer",
+        "generation_sha256",
+    )
     if (
         any(row.get(k) != generation.get(k) for k in fields)
         or row.get("run_fingerprint") != run["fingerprint"]
@@ -376,83 +419,56 @@ def _validate_score(row: dict, generation: dict, run: dict):
         raise ValueError("Judgment provenance/schema mismatch")
 
 
-def summarize(run: dict) -> dict:
+def _validated_records(run: dict) -> tuple[dict, dict]:
     generations = read_journal(run["directory"] / "generations/responses.jsonl")
     scores = read_journal(run["directory"] / "metrics/judgments.jsonl")
-    planned = {j["key"]: j for j in run["jobs"]}
+    planned = {job["key"]: job for job in run["jobs"]}
     if set(generations) - set(planned) or set(scores) - set(generations):
         raise ValueError("Unexpected generation/judgment keys")
     for key, row in generations.items():
         _validate_generation(row, planned[key], run)
     for key, row in scores.items():
         _validate_score(row, generations[key], run)
-    rows = []
-    layers = run["config"]["steering"]["layers"]
-    for source, layer in [(0, None)] + [
-        (source, block) for source in (1, 2, 3) for block in layers
-    ]:
-        for target in (1, 2, 3):
-            jobs = [
-                j
-                for j in run["jobs"]
-                if (j["source_level"], j["layer"], j["target_level"]) == (source, layer, target)
-            ]
-            labels = [scores[j["key"]]["success"] for j in jobs if j["key"] in scores]
-            complete = len(labels) == len(jobs)
-            rows.append(
-                {
-                    "source_level": source,
-                    "layer": layer,
-                    "target_level": target,
-                    "n_expected": len(jobs),
-                    "n_generated": sum(j["key"] in generations for j in jobs),
-                    "n_scored": len(labels),
-                    "n_success": sum(labels),
-                    "complete": complete,
-                    "asr": sum(labels) / len(jobs) if complete and jobs else None,
-                }
-            )
-    baselines = {r["target_level"]: r["asr"] for r in rows if r["source_level"] == 0}
-    for row in rows:
-        baseline = baselines[row["target_level"]]
-        row["baseline_asr"] = baseline
-        row["delta_asr"] = (
-            row["asr"] - baseline if baseline is not None and row["asr"] is not None else None
-        )
-    complete = len(scores) == len(planned)
-    report = {
-        "schema_version": 1,
-        "complete": complete,
-        "run_fingerprint": run["fingerprint"],
-        "asr_units": "fraction_0_to_1",
-        "delta_units": "fraction_points",
-        "matrix_rows": "source_level",
-        "matrix_columns": "target_level",
-        "expected_jobs": len(planned),
-        "generated_jobs": len(generations),
-        "scored_jobs": len(scores),
-        "cells": rows,
-    }
-    directory = run["directory"] / "metrics"
+    return generations, scores
+
+
+def _write_report(directory: Path, report: dict, layers: list[int]) -> None:
+    directory = directory / "metrics"
+    rows = report["cells"]
     atomic_json(directory / "summary.json", report)
     stream = io.StringIO()
     writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
     writer.writeheader()
     writer.writerows(rows)
     atomic_bytes(directory / "asr.csv", stream.getvalue().encode())
+
+    def display(cell):
+        if cell["asr"] is None:
+            return f"incomplete ({cell['n_scored']}/{cell['n_expected']} scored)"
+        return (
+            f"{cell['asr'] * 100:.2f}% ({cell['n_success']}/{cell['n_expected']}; "
+            f"95% CI {cell['asr_ci_low'] * 100:.2f}–{cell['asr_ci_high'] * 100:.2f}%)"
+        )
+
     md = [
-        "# ASR",
+        "# Out-of-fold ASR",
         "",
-        f"Complete: {complete}; scored {len(scores)}/{len(planned)}.",
+        f"Scope: {report['evaluation_scope']}; complete={report['complete']}; "
+        f"full_oof={report.get('full_oof', False)}.",
         "",
-        "Values are ASR percentages; rows are source levels, columns are evaluation levels.",
+        f"Scored {report['scored_jobs']}/{report['expected_jobs']} planned jobs.",
+        "",
+        "Rows are source-vector levels; columns are held-out evaluation levels.",
+        "ASR pools success counts and denominators, never unweighted fold means.",
+        "",
+        "95% Wilson intervals are binomial diagnostics assuming independent behaviors. "
+        "They do not capture shared-context dependence or uncertainty from overlapping "
+        "training folds and vector estimation. n_groups is available in JSON/CSV.",
         "",
     ]
-
-    def display(value):
-        return f"{value * 100:.2f}%" if value is not None else "incomplete"
-
-    md.append("Baseline: " + ", ".join(f"L{t}={display(baselines[t])}" for t in (1, 2, 3)))
+    for cell in rows:
+        if cell["source_level"] == 0:
+            md.append(f"Baseline L{cell['target_level']}: {display(cell)}")
     for layer in layers:
         md.extend(
             [
@@ -464,7 +480,74 @@ def summarize(run: dict) -> dict:
             ]
         )
         for source in (1, 2, 3):
-            cells = [r for r in rows if r["source_level"] == source and r["layer"] == layer]
-            md.append(f"| L{source} | " + " | ".join(display(r["asr"]) for r in cells) + " |")
+            cells = [row for row in rows if row["source_level"] == source and row["layer"] == layer]
+            md.append(f"| L{source} | " + " | ".join(display(cell) for cell in cells) + " |")
     atomic_bytes(directory / "asr.md", ("\n".join(md) + "\n").encode())
+
+
+def _make_report(
+    run: dict,
+    jobs: list[dict],
+    generations: dict,
+    scores: dict,
+    scope: str,
+    *,
+    full_oof: bool = False,
+) -> dict:
+    from .metrics import summarize_cells
+
+    group_ids = run.get("group_ids", {job["behavior_id"]: job["behavior_id"] for job in jobs})
+    rows = summarize_cells(
+        jobs, generations, scores, run["config"]["steering"]["layers"], group_ids
+    )
+    complete = len(scores) == len(jobs) and all(row["complete"] for row in rows)
+    return {
+        "schema_version": 2,
+        "complete": complete,
+        "full_oof": full_oof and complete,
+        "evaluation_scope": scope,
+        "run_fingerprint": run["fingerprint"],
+        "asr_units": "fraction_0_to_1",
+        "delta_units": "fraction_points",
+        "matrix_rows": "source_level",
+        "matrix_columns": "target_level",
+        "ci_method": "wilson_95_iid_binomial_diagnostic",
+        "ci_limitation": "Does not account for shared contexts, overlapping fit folds, or vector-estimation uncertainty",
+        "expected_jobs": len(jobs),
+        "generated_jobs": len(generations),
+        "scored_jobs": len(scores),
+        "cells": rows,
+    }
+
+
+def summarize(run: dict) -> dict:
+    generations, scores = _validated_records(run)
+    report = _make_report(run, run["jobs"], generations, scores, "single_fold")
+    report["fold"] = run.get("fold")
+    _write_report(run["directory"], report, run["config"]["steering"]["layers"])
+    return report
+
+
+def summarize_oof(run: dict) -> dict:
+    jobs, generations, scores = [], {}, {}
+    completed = []
+    for fold in run["all_fold_runs"]:
+        fold_generations, fold_scores = _validated_records(fold)
+        jobs.extend(fold["jobs"])
+        if set(generations) & set(fold_generations) or set(scores) & set(fold_scores):
+            raise ValueError("Duplicate journal keys across folds")
+        generations.update(fold_generations)
+        scores.update(fold_scores)
+        if len(fold_scores) == len(fold["jobs"]):
+            completed.append(fold["fold"])
+    report = _make_report(
+        run, jobs, generations, scores, "pooled_oof", full_oof=run["limit_per_level"] is None
+    )
+    report.update(
+        folds_expected=[fold["fold"] for fold in run["all_fold_runs"]],
+        folds_completed=completed,
+        limit_per_level=run["limit_per_level"],
+        interpretation="Performance of the fold-specific vector-building procedure, not one final fixed vector",
+    )
+    _write_report(run["directory"], report, run["config"]["steering"]["layers"])
     return report

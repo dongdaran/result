@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 from .config import COMMIT, load_config, require_judge, require_model
 from .prepare import prepare_dataset, read_prepared
-from .storage import atomic_bytes, run_lock
+from .storage import atomic_bytes, read_journal, run_lock
 
 
 def pin_models(config: dict, config_path: Path, *, refresh: bool = False) -> None:
@@ -107,6 +107,56 @@ def preflight(config: dict, model_key: str | None = None) -> bool:
     return okay
 
 
+def _run_target_folds(run: dict, command: str) -> None:
+    from .experiment import extract, generate
+    from .models import HFRunner
+
+    runner = None
+    try:
+        for fold in run["fold_runs"]:
+            path = fold["directory"] / "vectors/directions.pt"
+            responses = read_journal(fold["directory"] / "generations/responses.jsonl")
+            pending_generation = set(responses) != {job["key"] for job in fold["jobs"]}
+            needs_runner = (command != "generate" and not path.exists()) or (
+                command != "extract" and pending_generation
+            )
+            if command == "generate" and not path.exists():
+                raise ValueError(f"Extract fold {fold['fold']} vectors before generation")
+            if needs_runner and runner is None:
+                runner = HFRunner(
+                    require_model(run["config"], run["model_key"]), run["config"]["runtime"]
+                )
+            print(f"Target fold {fold['fold']}", flush=True)
+            if command != "generate":
+                extract(fold, runner)
+            if command != "extract":
+                generate(fold, runner)
+    finally:
+        if runner is not None:
+            runner.close()
+
+
+def _score_folds(run: dict) -> None:
+    from .evaluate import HarmBenchJudge
+    from .experiment import _environment, _validated_records, score
+
+    judge = None
+    try:
+        for fold in run["fold_runs"]:
+            generations, judgments = _validated_records(fold)
+            if len(generations) != len(fold["jobs"]):
+                raise ValueError(f"Complete fold {fold['fold']} generation before scoring")
+            if len(judgments) != len(fold["jobs"]) and judge is None:
+                judge = HarmBenchJudge(require_judge(run["config"]))
+            if judge is not None:
+                _environment(judge.runner, fold["directory"] / "logs/judge_environment.json")
+            print(f"Judge fold {fold['fold']}", flush=True)
+            score(fold, judge)
+    finally:
+        if judge is not None:
+            judge.close()
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Level-wise HarmBench steering experiments")
     result.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
@@ -127,7 +177,7 @@ def parser() -> argparse.ArgumentParser:
         command = sub.add_parser(name)
         command.add_argument("--model", required=True, help="A config model key, e.g. model_1")
         command.add_argument("--run-id", required=name != "smoke", default=None)
-        command.add_argument("--split", choices=("dev", "test"), default="test")
+        command.add_argument("--fold", type=int, help="Process one fold; default is all folds")
         command.add_argument("--limit-per-level", type=int)
     return result
 
@@ -152,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
                         "labels": len(labels),
                         "benign_safe": len(benign),
                         "fingerprint": saved["fingerprint"],
+                        "n_folds": saved["harmbench"]["n_folds"],
+                        "evaluation_protocol": "grouped_kfold_out_of_fold",
                     },
                     indent=2,
                 )
@@ -163,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "preflight":
             return 0 if preflight(config, args.model) else 2
 
-        from .experiment import extract, generate, score, setup_run, summarize
+        from .experiment import setup_run, summarize, summarize_oof
 
         require_model(config, args.model)
         if args.command in {"run", "score"}:
@@ -171,47 +223,35 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "smoke":
             config = copy.deepcopy(config)
             config["runtime"]["max_new_tokens"] = min(config["runtime"]["max_new_tokens"], 16)
-            args.split = "dev"
+            args.fold = args.fold if args.fold is not None else 1
             args.limit_per_level = 2
             if not args.run_id:
                 args.run_id = "smoke-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         run = setup_run(
-            root, config, config_path, args.model, args.run_id, args.split, args.limit_per_level
+            root, config, config_path, args.model, args.run_id, args.fold, args.limit_per_level
         )
         with run_lock(run["directory"]):
-            if args.command in {"smoke", "run"}:
-                # Unload the target before loading the 13B evaluation classifier.
-                from .models import HFRunner
-
-                runner = HFRunner(require_model(config, args.model), config["runtime"])
-                try:
-                    extract(run, runner)
-                    generate(run, runner)
-                finally:
-                    runner.close()
+            if args.command in {"smoke", "run", "extract", "generate"}:
+                _run_target_folds(run, args.command)
                 if args.command == "smoke":
                     print(f"GPU smoke complete: {run['directory']} (no ASR judge run)")
                     return 0
-                score(run)
-                report = summarize(run)
-            elif args.command == "extract":
-                payload = extract(run)
-                print(
-                    f"Vectors ready: levels {sorted(payload['vectors'])}, layers {payload['layers']}"
-                )
-                return 0
-            elif args.command == "generate":
-                generate(run)
-                return 0
-            elif args.command == "score":
-                score(run)
-                return 0
-            else:
-                report = summarize(run)
-            print(f"Results: {run['directory'] / 'metrics/asr.md'}")
+                if args.command in {"extract", "generate"}:
+                    return 0
+            if args.command in {"run", "score"}:
+                _score_folds(run)
+                if args.command == "score":
+                    return 0
+            selected_reports = [summarize(fold) for fold in run["fold_runs"]]
+            report = summarize_oof(run)
+            print(f"Pooled results: {run['directory'] / 'metrics/asr.md'}")
             print(
-                f"Coverage: {report['scored_jobs']}/{report['expected_jobs']}; complete={report['complete']}"
+                f"OOF coverage: {report['scored_jobs']}/{report['expected_jobs']}; "
+                f"complete={report['complete']}; full_oof={report['full_oof']}"
             )
+            if args.fold is not None:
+                print(f"Selected fold {args.fold}: complete={selected_reports[0]['complete']}")
+                return 0 if selected_reports[0]["complete"] else 2
             return 0 if report["complete"] else 2
     except (OSError, ValueError, RuntimeError, KeyError) as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)

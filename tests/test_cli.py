@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hb_steering import cli, experiment, models
+from hb_steering import cli, evaluate, experiment, models
 from hb_steering.config import load_config
 
 
@@ -30,7 +30,9 @@ def test_download_and_check_use_stdlib_pipeline(project, capsys):
         assert cli.main(["--root", str(project), "download", "--resplit"]) == 0
         assert prepare.call_args.kwargs == {"resplit": True}
     with patch.object(
-        cli, "read_prepared", return_value=([{}], {"a": 1}, [{}], {"fingerprint": "x"})
+        cli,
+        "read_prepared",
+        return_value=([{}], {"a": 1}, [{}], {"fingerprint": "x", "harmbench": {"n_folds": 5}}),
     ):
         assert cli.main(["--root", str(project), "check"]) == 0
     assert '"status": "ok"' in capsys.readouterr().out
@@ -79,38 +81,78 @@ def configured(project):
     return config, path
 
 
-def test_run_unloads_target_before_judge(project):
+def make_run_context(project, config, fold_ids=(1, 2, 3, 4, 5)):
+    return {
+        "directory": project / "outputs/x/model_1",
+        "config": config,
+        "model_key": "model_1",
+        "fold_runs": [
+            {
+                "directory": project / f"outputs/x/model_1/fold_{fold}",
+                "fold": fold,
+                "jobs": [{"key": f"fold:{fold}:job"}],
+            }
+            for fold in fold_ids
+        ],
+    }
+
+
+def test_run_reuses_one_target_then_unloads_before_one_judge(project):
     config, path = configured(project)
     calls = []
-    run = {"directory": project / "outputs/x/model_1"}
+    run = make_run_context(project, config)
 
     class Runner:
         def __init__(self, *_):
-            calls.append("load")
+            calls.append("target_load")
 
         def close(self):
-            calls.append("close")
+            calls.append("target_close")
 
+    class Judge:
+        def __init__(self, *_):
+            self.runner = object()
+            calls.append("judge_load")
+
+        def close(self):
+            calls.append("judge_close")
+
+    report = {"complete": True, "scored_jobs": 120, "expected_jobs": 120, "full_oof": True}
     with (
         patch.object(cli, "load_config", return_value=(config, path)),
         patch.object(experiment, "setup_run", return_value=run),
         patch.object(models, "HFRunner", Runner),
-        patch.object(experiment, "extract", side_effect=lambda *_: calls.append("extract")),
-        patch.object(experiment, "generate", side_effect=lambda *_: calls.append("generate")),
-        patch.object(experiment, "score", side_effect=lambda *_: calls.append("score")),
+        patch.object(evaluate, "HarmBenchJudge", Judge),
         patch.object(
             experiment,
-            "summarize",
-            return_value={"complete": True, "scored_jobs": 24, "expected_jobs": 24},
+            "extract",
+            side_effect=lambda fold, *_: calls.append(f"extract{fold['fold']}"),
         ),
+        patch.object(
+            experiment,
+            "generate",
+            side_effect=lambda fold, *_: calls.append(f"generate{fold['fold']}"),
+        ),
+        patch.object(
+            experiment,
+            "_validated_records",
+            side_effect=lambda fold: ({fold["jobs"][0]["key"]: {}}, {}),
+        ),
+        patch.object(experiment, "_environment"),
+        patch.object(
+            experiment, "score", side_effect=lambda fold, *_: calls.append(f"score{fold['fold']}")
+        ),
+        patch.object(experiment, "summarize", return_value=report),
+        patch.object(experiment, "summarize_oof", return_value=report),
     ):
         assert cli.main(["--root", str(project), "run", "--model", "model_1", "--run-id", "x"]) == 0
-    assert calls == ["load", "extract", "generate", "close", "score"]
+    assert calls == ["target_load"] + [
+        phase + str(fold) for fold in range(1, 6) for phase in ("extract", "generate")
+    ] + ["target_close", "judge_load"] + [f"score{fold}" for fold in range(1, 6)] + ["judge_close"]
 
 
 def test_smoke_caps_generation_and_keeps_judge_unloaded(project):
     config, path = configured(project)
-    run = {"directory": project / "outputs/x/model_1"}
     captured = {}
 
     class Runner:
@@ -120,9 +162,9 @@ def test_smoke_caps_generation_and_keeps_judge_unloaded(project):
         def close(self):
             captured["closed"] = True
 
-    def setup(root, actual, source, model, ident, split, limit):
-        captured.update(split=split, limit=limit)
-        return run
+    def setup(root, actual, source, model, ident, fold, limit):
+        captured.update(fold=fold, limit=limit)
+        return make_run_context(project, actual, (fold,))
 
     with (
         patch.object(cli, "load_config", return_value=(config, path)),
@@ -130,11 +172,66 @@ def test_smoke_caps_generation_and_keeps_judge_unloaded(project):
         patch.object(models, "HFRunner", Runner),
         patch.object(experiment, "extract"),
         patch.object(experiment, "generate"),
-        patch.object(experiment, "score", side_effect=AssertionError("No judge in smoke")),
+        patch.object(cli, "_score_folds", side_effect=AssertionError("No judge in smoke")),
     ):
         assert (
             cli.main(["--root", str(project), "smoke", "--model", "model_1", "--run-id", "x"]) == 0
         )
     assert captured["runtime"]["max_new_tokens"] == 16
-    assert captured["split"] == "dev" and captured["limit"] == 2 and captured["closed"]
+    assert captured["fold"] == 1 and captured["limit"] == 2 and captured["closed"]
     assert config["runtime"]["max_new_tokens"] == 512
+
+
+def test_completed_target_folds_resume_without_model_loading(project):
+    from hb_steering.storage import append_record
+
+    config, _ = configured(project)
+    run = make_run_context(project, config)
+    for fold in run["fold_runs"]:
+        path = fold["directory"] / "vectors/directions.pt"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"fixture")
+        append_record(fold["directory"] / "generations/responses.jsonl", fold["jobs"][0])
+    with (
+        patch.object(models, "HFRunner", side_effect=AssertionError("Must reuse completed target")),
+        patch.object(experiment, "extract") as extract,
+        patch.object(experiment, "generate") as generate,
+    ):
+        cli._run_target_folds(run, "run")
+    assert extract.call_count == generate.call_count == 5
+
+
+def test_single_fold_success_can_leave_full_pool_incomplete(project, capsys):
+    config, path = configured(project)
+    run = make_run_context(project, config, (2,))
+    pooled = {"complete": False, "scored_jobs": 24, "expected_jobs": 120, "full_oof": False}
+    with (
+        patch.object(cli, "load_config", return_value=(config, path)),
+        patch.object(experiment, "setup_run", return_value=run) as setup,
+        patch.object(experiment, "summarize", return_value={"complete": True}),
+        patch.object(experiment, "summarize_oof", return_value=pooled),
+    ):
+        assert (
+            cli.main(
+                [
+                    "--root",
+                    str(project),
+                    "summarize",
+                    "--model",
+                    "model_1",
+                    "--run-id",
+                    "x",
+                    "--fold",
+                    "2",
+                ]
+            )
+            == 0
+        )
+    assert setup.call_args.args[5] == 2
+    assert "complete=False; full_oof=False" in capsys.readouterr().out
+
+
+def test_legacy_split_flag_is_rejected():
+    with pytest.raises(SystemExit) as error:
+        cli.parser().parse_args(["run", "--model", "model_1", "--run-id", "x", "--split", "dev"])
+    assert error.value.code == 2
