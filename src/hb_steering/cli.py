@@ -19,7 +19,8 @@ from .storage import atomic_bytes, read_journal, run_lock
 def pin_models(config: dict, config_path: Path, *, refresh: bool = False) -> None:
     text = config_path.read_text()
     entries = [(f"models.{key}", value) for key, value in config["models"].items()]
-    entries.append(("judge", config["judge"]))
+    if config["judge"].get("method") != "rule":
+        entries.append(("judge", config["judge"]))
     replacements = {}
     for section, model in entries:
         model_id = str(model.get("hf_id", "")).strip()
@@ -113,7 +114,8 @@ def _run_target_folds(run: dict, command: str) -> None:
 
     runner = None
     try:
-        for fold in run["fold_runs"]:
+        for fold in _selected_runs(run):
+            label = f"fold {fold['fold']}" if "fold" in fold else "final external transfer"
             path = fold["directory"] / "vectors/directions.pt"
             responses = read_journal(fold["directory"] / "generations/responses.jsonl")
             pending_generation = set(responses) != {job["key"] for job in fold["jobs"]}
@@ -121,12 +123,12 @@ def _run_target_folds(run: dict, command: str) -> None:
                 command != "extract" and pending_generation
             )
             if command == "generate" and not path.exists():
-                raise ValueError(f"Extract fold {fold['fold']} vectors before generation")
+                raise ValueError(f"Extract {label} vectors before generation")
             if needs_runner and runner is None:
                 runner = HFRunner(
                     require_model(run["config"], run["model_key"]), run["config"]["runtime"]
                 )
-            print(f"Target fold {fold['fold']}", flush=True)
+            print(f"Target {label}", flush=True)
             if command != "generate":
                 extract(fold, runner)
             if command != "extract":
@@ -137,24 +139,37 @@ def _run_target_folds(run: dict, command: str) -> None:
 
 
 def _score_folds(run: dict) -> None:
-    from .evaluate import HarmBenchJudge
+    from .evaluate import HarmBenchJudge, RuleJudge
     from .experiment import _environment, _validated_records, score
 
     judge = None
     try:
-        for fold in run["fold_runs"]:
+        for fold in _selected_runs(run):
+            label = f"fold {fold['fold']}" if "fold" in fold else "final external transfer"
             generations, judgments = _validated_records(fold)
             if len(generations) != len(fold["jobs"]):
-                raise ValueError(f"Complete fold {fold['fold']} generation before scoring")
+                raise ValueError(f"Complete {label} generation before scoring")
             if len(judgments) != len(fold["jobs"]) and judge is None:
-                judge = HarmBenchJudge(require_judge(run["config"]))
-            if judge is not None:
+                judge_config = require_judge(run["config"])
+                judge = (
+                    RuleJudge(judge_config)
+                    if judge_config.get("method") == "rule"
+                    else HarmBenchJudge(judge_config)
+                )
+            if judge is not None and hasattr(judge, "runner"):
                 _environment(judge.runner, fold["directory"] / "logs/judge_environment.json")
-            print(f"Judge fold {fold['fold']}", flush=True)
+            print(f"Score {label}", flush=True)
             score(fold, judge)
     finally:
         if judge is not None:
             judge.close()
+
+
+def _selected_runs(run: dict) -> list[dict]:
+    contexts = list(run["fold_runs"])
+    if run.get("selected_fold") is None and run.get("transfer_run"):
+        contexts.append(run["transfer_run"])
+    return contexts
 
 
 def parser() -> argparse.ArgumentParser:
@@ -173,11 +188,14 @@ def parser() -> argparse.ArgumentParser:
     )
     pre = sub.add_parser("preflight", help="Check CUDA and optionally model/tokenizer access")
     pre.add_argument("--model")
-    for name in ("smoke", "extract", "generate", "score", "summarize", "run"):
+    for name in ("smoke", "extract", "generate", "score", "summarize", "run", "transfer"):
         command = sub.add_parser(name)
         command.add_argument("--model", required=True, help="A config model key, e.g. model_1")
         command.add_argument("--run-id", required=name != "smoke", default=None)
-        command.add_argument("--fold", type=int, help="Process one fold; default is all folds")
+        if name != "transfer":
+            command.add_argument("--fold", type=int, help="Process one fold; default is all folds")
+        else:
+            command.set_defaults(fold=None)
         command.add_argument("--limit-per-level", type=int)
     return result
 
@@ -194,6 +212,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "check":
             records, labels, benign, saved = read_prepared(root, config)
+            external_summary = None
+            if config.get("external", {}).get("enabled", False):
+                from .external import read_external
+
+                fit_ids = set(saved["benign"]["fit"])
+                harmful, safe = read_external(
+                    root, config, records, [r for r in benign if r["benign_id"] in fit_ids]
+                )
+                external_summary = {"harmful": len(harmful), "benign": len(safe)}
             print(
                 json.dumps(
                     {
@@ -204,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
                         "fingerprint": saved["fingerprint"],
                         "n_folds": saved["harmbench"]["n_folds"],
                         "evaluation_protocol": "grouped_kfold_out_of_fold",
+                        "external": external_summary,
                     },
                     indent=2,
                 )
@@ -215,10 +243,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "preflight":
             return 0 if preflight(config, args.model) else 2
 
-        from .experiment import setup_run, summarize, summarize_oof
+        from .experiment import setup_run, summarize, summarize_oof, summarize_transfer
 
         require_model(config, args.model)
-        if args.command in {"run", "score"}:
+        if args.command in {"run", "score", "transfer"}:
             require_judge(config)
         if args.command == "smoke":
             config = copy.deepcopy(config)
@@ -231,6 +259,16 @@ def main(argv: list[str] | None = None) -> int:
             root, config, config_path, args.model, args.run_id, args.fold, args.limit_per_level
         )
         with run_lock(run["directory"]):
+            if args.command == "transfer":
+                if not run.get("transfer_run"):
+                    raise ValueError("Enable external and/or over_refusal evaluation for transfer")
+                transfer_only = {**run, "fold_runs": [run["transfer_run"]]}
+                transfer_only.pop("transfer_run")
+                _run_target_folds(transfer_only, "run")
+                _score_folds(transfer_only)
+                transfer_report = summarize_transfer(run["transfer_run"])
+                print(f"Transfer results: {run['transfer_run']['directory'] / 'metrics'}")
+                return 0 if transfer_report["complete"] else 2
             if args.command in {"smoke", "run", "extract", "generate"}:
                 _run_target_folds(run, args.command)
                 if args.command == "smoke":
@@ -252,7 +290,12 @@ def main(argv: list[str] | None = None) -> int:
             if args.fold is not None:
                 print(f"Selected fold {args.fold}: complete={selected_reports[0]['complete']}")
                 return 0 if selected_reports[0]["complete"] else 2
-            return 0 if report["complete"] else 2
+            transfer_complete = True
+            if run.get("transfer_run"):
+                transfer_report = summarize_transfer(run["transfer_run"])
+                transfer_complete = transfer_report["complete"]
+                print(f"Transfer complete={transfer_complete}; full_transfer={transfer_report['full_transfer']}")
+            return 0 if report["complete"] and transfer_complete else 2
     except (OSError, ValueError, RuntimeError, KeyError) as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

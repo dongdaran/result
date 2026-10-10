@@ -389,3 +389,142 @@ def test_pooled_summary_rejects_cross_fold_judgment_metadata(project_factory):
 def test_unknown_or_noninteger_selected_fold_is_rejected(project_factory, fold):
     with pytest.raises(ValueError, match="Select --fold"):
         project_factory()["setup"](fold=fold)
+
+
+def make_rule_transfer(project, monkeypatch, *, external=True, limit=None):
+    config = deepcopy(project["config"])
+    config["judge"] = {"method": "rule", "version": "gcg_refusal_v1"}
+    config["evaluation"] = {"over_refusal": True}
+    config["external"] = {
+        "enabled": external,
+        "labels_path": "data/annotations/external_severity.csv",
+    }
+    harmful = [
+        {
+            "behavior_id": f"jbb_harmful:{level}",
+            "behavior": f"Synthetic external instruction {level}",
+            "context": "",
+            "functional_category": "standard",
+            "level": level,
+            "dataset": "jailbreakbench_original",
+        }
+        for level in (1, 2, 3)
+    ]
+    benign = [
+        {
+            "behavior_id": f"jbb_benign:{index}",
+            "behavior": f"Synthetic external safe question {index}",
+            "context": "",
+            "level": 0,
+            "dataset": "jailbreakbench_benign",
+        }
+        for index in range(5)
+    ]
+    if external:
+        from hb_steering import external as external_module
+
+        monkeypatch.setattr(external_module, "read_external", lambda *_: (harmful, benign))
+        for path in (
+            project["root"] / "data/processed/external/manifest.json",
+            project["root"] / config["external"]["labels_path"],
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("synthetic frozen external identity")
+    return project["setup"](actual_config=config, limit=limit)
+
+
+class RuleTransferRunner(FakeRunner):
+    def generate(self, prompt, steering=None):
+        source = 0 if steering is None else round(steering["vector"][0].item())
+        self.generation_calls[(prompt, source)] += 1
+        return "I can’t assist with this request." if source == 2 else "Synthetic useful response."
+
+
+def test_final_transfer_fit_and_safe_evaluation_are_disjoint(project_factory, monkeypatch):
+    run = make_rule_transfer(project_factory(counts=(10, 10, 10)), monkeypatch)
+    transfer = run["transfer_run"]
+    assert {r["behavior_id"] for r in transfer["fit"]} == {
+        r["behavior_id"] for r in run["records"]
+    }
+    assert not {r["behavior_id"] for r in transfer["evaluation"]} & {
+        r["behavior_id"] for r in transfer["fit"]
+    }
+    xstest_ids = {
+        r["behavior_id"].removeprefix("xstest_safe:")
+        for r in transfer["evaluation"]
+        if r["dataset"] == "xstest_safe"
+    }
+    assert xstest_ids == {"safe16", "safe17", "safe18", "safe19"}
+    assert not xstest_ids & {r["benign_id"] for r in transfer["benign_fit"]}
+    assert len(transfer["jobs"]) == (3 + 4 + 5) * 4
+    assert all("fold" not in job and job["key"].startswith("transfer:") for job in transfer["jobs"])
+
+
+def test_rule_transfer_runs_once_reports_complements_and_resumes(project_factory, monkeypatch):
+    pytest.importorskip("torch")
+    from hb_steering.evaluate import HarmBenchJudge
+
+    monkeypatch.setattr(HarmBenchJudge, "__init__", lambda *_: pytest.fail("No classifier weights"))
+    run = make_rule_transfer(project_factory(counts=(10, 10, 10)), monkeypatch)
+    transfer, runner = run["transfer_run"], RuleTransferRunner()
+    payload = experiment.extract(transfer, runner)
+    assert "fold" not in payload
+    used = {prompt for prompts in runner.activation_inputs[1:] for prompt in prompts}
+    assert used == {experiment.behavior_prompt(r) for r in transfer["fit"]}
+    assert not used & {experiment.behavior_prompt(r) for r in transfer["evaluation"]}
+    experiment.generate(transfer, runner)
+    experiment.score(transfer)
+    report = experiment.summarize_transfer(transfer)
+    assert report["complete"] is report["full_transfer"] is True
+    assert report["fit_counts"] == {"1": 10, "2": 10, "3": 10}
+    assert len(report["cells"]) == 12 and len(report["over_refusal_cells"]) == 8
+    for row in report["cells"]:
+        assert row["asr_rule"] == float(row["source_level"] != 2)
+    for row in report["over_refusal_cells"]:
+        assert row["over_refusal"] == 1 - row["asr_rule"] == float(row["source_level"] == 2)
+        assert row["n_expected"] == (4 if row["dataset"] == "xstest_safe" else 5)
+    before = runner.generation_calls.copy()
+    experiment.extract(transfer, runner)
+    experiment.generate(transfer, runner)
+    experiment.score(transfer)
+    assert runner.generation_calls == before
+    for filename in ("summary.json", "asr_rule.csv", "asr_rule.md", "over_refusal.csv", "over_refusal.md"):
+        assert (transfer["directory"] / "metrics" / filename).is_file()
+
+
+def test_transfer_incomplete_scores_are_not_counted_as_refusals(project_factory, monkeypatch):
+    pytest.importorskip("torch")
+    transfer = make_rule_transfer(project_factory(counts=(10, 10, 10)), monkeypatch)["transfer_run"]
+    runner = RuleTransferRunner()
+    experiment.extract(transfer, runner)
+    experiment.generate(transfer, runner)
+    report = experiment.summarize_transfer(transfer)
+    assert report["complete"] is report["full_transfer"] is False
+    assert all(row["asr_rule"] is None for row in report["cells"])
+    assert all(row["over_refusal"] is None for row in report["over_refusal_cells"])
+
+
+def test_rule_score_resume_rejects_tampered_rule_identity(project_factory, monkeypatch):
+    pytest.importorskip("torch")
+    transfer = make_rule_transfer(project_factory(counts=(10, 10, 10)), monkeypatch)["transfer_run"]
+    runner = RuleTransferRunner()
+    experiment.extract(transfer, runner)
+    experiment.generate(transfer, runner)
+    experiment.score(transfer)
+    path = transfer["directory"] / "metrics/judgments.jsonl"
+    rows = list(read_journal(path).values())
+    rows[0]["evaluator"]["sha256"] = "wrong identity"
+    atomic_bytes(path, "".join(json.dumps(row) + "\n" for row in rows).encode())
+    with pytest.raises(ValueError, match="frozen evaluator"):
+        experiment.score(transfer)
+
+
+def test_safe_only_transfer_and_limited_fit_are_explicit(project_factory, monkeypatch):
+    run = make_rule_transfer(project_factory(counts=(10, 10, 10)), monkeypatch, external=False, limit=1)
+    transfer = run["transfer_run"]
+    assert len(transfer["fit"]) == len(transfer["benign_fit"]) == 3
+    assert len(transfer["evaluation"]) == 3
+    assert {job["target_level"] for job in transfer["jobs"]} == {0}
+    report = experiment.summarize_transfer(transfer)
+    assert report["cells"] == [] and len(report["over_refusal_cells"]) == 4
+    assert report["full_transfer"] is False and report["limit_per_level"] == 1

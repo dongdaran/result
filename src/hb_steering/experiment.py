@@ -86,6 +86,17 @@ def setup_run(
     benign_fit = sorted(
         (r for r in benign if r["benign_id"] in benign_ids), key=lambda r: r["benign_id"]
     )
+    # Preserve the full benign fit set for leakage checks even during a smoke run.
+    external_harmful, external_benign = [], []
+    external_identity = None
+    if config.get("external", {}).get("enabled", False):
+        from .external import read_external
+
+        external_harmful, external_benign = read_external(root, config, records, benign_fit)
+        external_identity = {
+            "manifest_sha256": file_digest(root / "data/processed/external/manifest.json"),
+            "labels_sha256": file_digest(root / config["external"]["labels_path"]),
+        }
     if limit:
         benign_fit = benign_fit[: 3 * limit]
     code = {
@@ -104,7 +115,12 @@ def setup_run(
         if (root / "uv.lock").exists()
         else None,
         "limit_per_level": limit,
+        "external_identity": external_identity,
     }
+    if config["judge"].get("method") == "rule":
+        from .evaluate import rule_metadata
+
+        run_spec["evaluator"] = rule_metadata()
     directory = root / "outputs" / run_id
     with run_lock(directory):
         path = directory / "manifest.json"
@@ -144,11 +160,80 @@ def setup_run(
                 "fingerprint": fingerprint({"model_fingerprint": model_fingerprint, "fold": index}),
             }
         )
-    return {
+    result = {
         **common,
         "all_fold_runs": fold_runs,
         "fold_runs": [run for run in fold_runs if fold is None or run["fold"] == fold],
         "selected_fold": fold,
+    }
+    if config.get("external", {}).get("enabled", False) or config.get("evaluation", {}).get(
+        "over_refusal", False
+    ):
+        result["transfer_run"] = _setup_transfer(
+            common, records, labels, benign, saved, external_harmful, external_benign, limit
+        )
+    return result
+
+
+def _setup_transfer(
+    common: dict,
+    records: list[dict],
+    labels: dict,
+    benign: list[dict],
+    saved: dict,
+    external_harmful: list[dict],
+    external_benign: list[dict],
+    limit: int | None,
+) -> dict:
+    """One final HB-only vector set, evaluated on independent external/safe prompts."""
+    harmful_labels = {r["behavior_id"]: r["level"] for r in external_harmful}
+    evaluation = (
+        selected_records(external_harmful, harmful_labels, list(harmful_labels), limit)
+        if external_harmful
+        else []
+    )
+    if common["config"].get("evaluation", {}).get("over_refusal", False):
+        test_ids = set(saved["benign"]["test"])
+        safe = [
+            {
+                "behavior_id": f"xstest_safe:{r['benign_id']}",
+                "behavior": r["prompt"],
+                "context": "",
+                "functional_category": "standard",
+                "level": 0,
+                "dataset": "xstest_safe",
+                "group_id": f"xstest_safe:{r['benign_id']}",
+            }
+            for r in benign
+            if r["benign_id"] in test_ids
+        ]
+        for dataset_rows in (safe, external_benign):
+            ordered = sorted(dataset_rows, key=lambda r: r["behavior_id"])
+            evaluation.extend(ordered[: 3 * limit] if limit else ordered)
+    if not evaluation:
+        raise ValueError("Transfer evaluation has no independent prompts")
+    eval_labels = {r["behavior_id"]: r["level"] for r in evaluation}
+    if len(eval_labels) != len(evaluation) or set(eval_labels) & set(labels):
+        raise ValueError("Transfer evaluation IDs overlap each other or HarmBench fit IDs")
+    jobs = plan_jobs(evaluation, eval_labels, common["config"]["steering"]["layers"])
+    dataset_by_id = {r["behavior_id"]: r["dataset"] for r in evaluation}
+    for job in jobs:
+        job["dataset"] = dataset_by_id[job["behavior_id"]]
+        job["key"] = "transfer:" + job["key"]
+    return {
+        **common,
+        "directory": common["directory"] / "transfer",
+        "records": records + evaluation,
+        "labels": {**labels, **eval_labels},
+        "fit": selected_records(records, labels, list(labels), limit),
+        "evaluation": evaluation,
+        "jobs": jobs,
+        "group_ids": {
+            r["behavior_id"]: r.get("group_id", r["behavior_id"]) for r in evaluation
+        },
+        "fingerprint": fingerprint(
+            {"model_fingerprint": common["fingerprint"], "scope": "final_external_transfer"}
+        ),
     }
 
 
@@ -271,7 +356,7 @@ def _validate_generation(row: dict, job: dict, run: dict):
         raise ValueError(f"Generation job metadata mismatch: {job['key']}")
     if row.get("run_fingerprint") != run["fingerprint"] or not isinstance(
         row.get("generation"), str
-    ):
+    ) or not row["generation"].strip():
         raise ValueError("Generation provenance/schema mismatch")
     if row.get("generation_sha256") != fingerprint(row["generation"]):
         raise ValueError("Generation content checksum mismatch")
@@ -312,8 +397,8 @@ def generate(run: dict, runner=None) -> dict:
                 }  # Already normalized at extraction if configured.
             try:
                 text = runner.generate(behavior_prompt(behavior_map[job["behavior_id"]]), steering)
-                if not isinstance(text, str):
-                    raise ValueError("Generation did not return text")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("Generation did not return nonempty text")
                 row = {
                     **job,
                     "run_fingerprint": run["fingerprint"],
@@ -342,7 +427,7 @@ def generate(run: dict, runner=None) -> dict:
 
 
 def score(run: dict, judge=None) -> dict:
-    from .evaluate import HarmBenchJudge
+    from .evaluate import HarmBenchJudge, RuleJudge
 
     generations = read_journal(run["directory"] / "generations/responses.jsonl")
     planned = {j["key"]: j for j in run["jobs"]}
@@ -362,16 +447,28 @@ def score(run: dict, judge=None) -> dict:
         return existing
     owned = judge is None
     if owned:
-        judge = HarmBenchJudge(require_judge(run["config"]))
+        judge_config = require_judge(run["config"])
+        judge = (
+            RuleJudge(judge_config)
+            if judge_config.get("method") == "rule"
+            else HarmBenchJudge(judge_config)
+        )
     failed = 0
     try:
-        if owned:
+        if owned and hasattr(judge, "runner"):
             _environment(judge.runner, run["directory"] / "logs/judge_environment.json")
+        elif hasattr(judge, "metadata"):
+            atomic_json(run["directory"] / "logs/rule_evaluator.json", judge.metadata)
         behavior_map = {r["behavior_id"]: r for r in run["records"]}
         for index, key in enumerate(pending, 1):
             generation = generations[key]
             try:
-                success = judge.judge(
+                details = (
+                    judge.score(generation["generation"])
+                    if isinstance(judge, RuleJudge)
+                    else {}
+                )
+                success = details.get("success") if details else judge.judge(
                     behavior_map[generation["behavior_id"]], generation["generation"]
                 )
                 if type(success) is not bool:
@@ -381,6 +478,7 @@ def score(run: dict, judge=None) -> dict:
                     "run_fingerprint": run["fingerprint"],
                     "generation_sha256": generation["generation_sha256"],
                     "success": success,
+                    **details,
                 }
                 append_record(path, row)
                 existing[key] = row
@@ -410,6 +508,7 @@ def _validate_score(row: dict, generation: dict, run: dict):
         "source_level",
         "layer",
         "generation_sha256",
+        "dataset",
     )
     if (
         any(row.get(k) != generation.get(k) for k in fields)
@@ -417,6 +516,12 @@ def _validate_score(row: dict, generation: dict, run: dict):
         or type(row.get("success")) is not bool
     ):
         raise ValueError("Judgment provenance/schema mismatch")
+    if run["config"]["judge"].get("method") == "rule":
+        from .evaluate import RuleJudge
+
+        expected = RuleJudge(run["config"]["judge"]).score(generation["generation"])
+        if any(row.get(key) != value for key, value in expected.items()):
+            raise ValueError("Rule judgment differs from the frozen evaluator or response")
 
 
 def _validated_records(run: dict) -> tuple[dict, dict]:
@@ -440,7 +545,11 @@ def _write_report(directory: Path, report: dict, layers: list[int]) -> None:
     writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
     writer.writeheader()
     writer.writerows(rows)
-    atomic_bytes(directory / "asr.csv", stream.getvalue().encode())
+    csv_data = stream.getvalue().encode()
+    atomic_bytes(directory / "asr.csv", csv_data)
+    metric = "ASR_rule" if report.get("evaluation_method") == "rule" else "ASR_HarmBench"
+    if metric == "ASR_rule":
+        atomic_bytes(directory / "asr_rule.csv", csv_data)
 
     def display(cell):
         if cell["asr"] is None:
@@ -451,21 +560,27 @@ def _write_report(directory: Path, report: dict, layers: list[int]) -> None:
         )
 
     md = [
-        "# Out-of-fold ASR",
+        f"# {metric}",
         "",
         f"Scope: {report['evaluation_scope']}; complete={report['complete']}; "
         f"full_oof={report.get('full_oof', False)}.",
         "",
-        f"Scored {report['scored_jobs']}/{report['expected_jobs']} planned jobs.",
+        f"Scored {report['scored_jobs']}/{report['expected_jobs']} planned suite jobs.",
         "",
-        "Rows are source-vector levels; columns are held-out evaluation levels.",
-        "ASR pools success counts and denominators, never unweighted fold means.",
+        "Rows are source-vector levels; columns are evaluation prompt levels.",
+        f"{metric} pools success counts and denominators, never unweighted fold means.",
         "",
         "95% Wilson intervals are binomial diagnostics assuming independent behaviors. "
         "They do not capture shared-context dependence or uncertainty from overlapping "
         "training folds and vector estimation. n_groups is available in JSON/CSV.",
         "",
     ]
+    if metric == "ASR_rule":
+        md.extend([
+            "ASR_rule is the fraction without a matched refusal phrase. It is a non-refusal "
+            "proxy and does not establish harmful compliance or answer quality.",
+            "",
+        ])
     for cell in rows:
         if cell["source_level"] == 0:
             md.append(f"Baseline L{cell['target_level']}: {display(cell)}")
@@ -482,7 +597,10 @@ def _write_report(directory: Path, report: dict, layers: list[int]) -> None:
         for source in (1, 2, 3):
             cells = [row for row in rows if row["source_level"] == source and row["layer"] == layer]
             md.append(f"| L{source} | " + " | ".join(display(cell) for cell in cells) + " |")
-    atomic_bytes(directory / "asr.md", ("\n".join(md) + "\n").encode())
+    md_data = ("\n".join(md) + "\n").encode()
+    atomic_bytes(directory / "asr.md", md_data)
+    if metric == "ASR_rule":
+        atomic_bytes(directory / "asr_rule.md", md_data)
 
 
 def _make_report(
@@ -497,12 +615,16 @@ def _make_report(
     from .metrics import summarize_cells
 
     group_ids = run.get("group_ids", {job["behavior_id"]: job["behavior_id"] for job in jobs})
+    method = "rule" if run["config"]["judge"].get("method") == "rule" else "harmbench"
     rows = summarize_cells(
-        jobs, generations, scores, run["config"]["steering"]["layers"], group_ids
+        jobs, generations, scores, run["config"]["steering"]["layers"], group_ids,
+        evaluation_method=method,
     )
     complete = len(scores) == len(jobs) and all(row["complete"] for row in rows)
     return {
         "schema_version": 2,
+        "evaluation_method": method,
+        "metric": "asr_rule" if method == "rule" else "asr_harmbench",
         "complete": complete,
         "full_oof": full_oof and complete,
         "evaluation_scope": scope,
@@ -550,4 +672,86 @@ def summarize_oof(run: dict) -> dict:
         interpretation="Performance of the fold-specific vector-building procedure, not one final fixed vector",
     )
     _write_report(run["directory"], report, run["config"]["steering"]["layers"])
+    return report
+
+
+def summarize_transfer(run: dict) -> dict:
+    """Report external harmful ASR_rule and independent safe over-refusal separately."""
+    from .metrics import summarize_over_refusal
+
+    generations, scores = _validated_records(run)
+    harmful_jobs = [job for job in run["jobs"] if job["target_level"] in (1, 2, 3)]
+    safe_jobs = [job for job in run["jobs"] if job["target_level"] == 0]
+
+    def subset(rows, jobs):
+        keys = {job["key"] for job in jobs}
+        return {key: row for key, row in rows.items() if key in keys}
+
+    layers = run["config"]["steering"]["layers"]
+    report = (
+        _make_report(
+            run, harmful_jobs, subset(generations, harmful_jobs), subset(scores, harmful_jobs),
+            "final_external_transfer",
+        )
+        if harmful_jobs
+        else {"cells": [], "evaluation_method": "rule"}
+    )
+    safe_cells = (
+        summarize_over_refusal(
+            safe_jobs, subset(generations, safe_jobs), subset(scores, safe_jobs), layers,
+            run["group_ids"], evaluation_method="rule",
+        )
+        if safe_jobs
+        else []
+    )
+    complete = len(scores) == len(run["jobs"]) and all(
+        row["complete"] for row in report["cells"] + safe_cells
+    )
+    report.update(
+        schema_version=3,
+        evaluation_scope="final_external_transfer",
+        run_fingerprint=run["fingerprint"],
+        complete=complete,
+        full_transfer=complete and run["limit_per_level"] is None,
+        limit_per_level=run["limit_per_level"],
+        fit_scope="all_harmbench_only",
+        fit_counts={
+            str(level): sum(run["labels"][r["behavior_id"]] == level for r in run["fit"])
+            for level in (1, 2, 3)
+        },
+        harmful_datasets=sorted({job["dataset"] for job in harmful_jobs}),
+        expected_jobs=len(run["jobs"]),
+        generated_jobs=len(generations),
+        scored_jobs=len(scores),
+        harmful_expected_jobs=len(harmful_jobs),
+        safe_expected_jobs=len(safe_jobs),
+        over_refusal_cells=safe_cells,
+        interpretation="One final HB-only vector set; external and safe prompts never fit the vectors",
+    )
+    if report["cells"]:
+        _write_report(run["directory"], report, layers)
+    directory = run["directory"] / "metrics"
+    if safe_cells:
+        stream = io.StringIO()
+        writer = csv.DictWriter(stream, fieldnames=list(safe_cells[0]))
+        writer.writeheader()
+        writer.writerows(safe_cells)
+        atomic_bytes(directory / "over_refusal.csv", stream.getvalue().encode())
+        md = [
+            "# Rule-based over-refusal", "",
+            "On safe prompts: over_refusal = 1 - ASR_rule. Refusal phrases are a heuristic.",
+            "", "| Dataset | Vector | Block | ASR_rule | Over-refusal | Scored / expected |",
+            "|---|---|---|---:|---:|---:|",
+        ]
+        for cell in safe_cells:
+            asr = cell["asr_rule"]
+            refusal = cell["over_refusal"]
+            source = "baseline" if cell["source_level"] == 0 else f"L{cell['source_level']}"
+            md.append(
+                f"| {cell['dataset']} | {source} | {cell['layer']} | "
+                + (f"{asr:.2%} | {refusal:.2%}" if asr is not None else "incomplete | incomplete")
+                + f" | {cell['n_scored']} / {cell['n_expected']} |"
+            )
+        atomic_bytes(directory / "over_refusal.md", ("\n".join(md) + "\n").encode())
+    atomic_json(directory / "summary.json", report)
     return report

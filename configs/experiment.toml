@@ -14,6 +14,20 @@ n_folds = 5
 # External XSTest safe reference: the same benign fit set is used in every fold.
 benign_ratios = [0.6, 0.2, 0.2]
 
+[evaluation]
+# Safe test inputs: baseline and the three final vectors, no severity columns.
+over_refusal = true
+
+[external]
+enabled = true
+# Harmful Source=Original rows only; normalized HarmBench overlaps are excluded.
+# No external prompt contributes to extraction or configuration selection.
+source = "jailbreakbench_original"
+revision = "886acc352a31533ffbcf4ef22c744658688086fc"
+harmful_sha256 = "4a8ec6832056b631eb092dccc60d37a61c3d441268268888b3d006288afeffa1"
+benign_sha256 = "3cda234d21a991fa309bbfea4b6d9dae31ccdf8e9d452424b6a983e4fdc33468"
+labels_path = "data/annotations/external_severity.csv"
+
 # Fill these later. A full commit SHA is required for GPU runs.
 # ./scripts/pin-models resolves the configured HF IDs to commit SHAs.
 [models.model_1]
@@ -46,10 +60,7 @@ coefficient = 1.0
 normalize = false
 
 [judge]
-hf_id = "cais/HarmBench-Llama-2-13b-cls"
-# Resolved by ./scripts/pin-models before a scored GPU run.
-revision = "bda705349d1144fa618770bea64d99ce54e3835b"
-dtype = "auto"
-device = "cuda"
-max_input_tokens = 8192
-max_new_tokens = 3
+# CPU scoring: ASR_rule is the fraction of responses without a refusal marker.
+# On safe questions, over_refusal = 1 - ASR_rule.
+method = "rule"
+version = "gcg_refusal_v1"

@@ -29,7 +29,9 @@ def test_download_and_check_use_stdlib_pipeline(project, capsys):
     with patch.object(cli, "prepare_dataset", return_value={"ready": True}) as prepare:
         assert cli.main(["--root", str(project), "download", "--resplit"]) == 0
         assert prepare.call_args.kwargs == {"resplit": True}
-    with patch.object(
+    config, path = load_config(project)
+    config["external"]["enabled"] = False
+    with patch.object(cli, "load_config", return_value=(config, path)), patch.object(
         cli,
         "read_prepared",
         return_value=([{}], {"a": 1}, [{}], {"fingerprint": "x", "harmbench": {"n_folds": 5}}),
@@ -50,7 +52,7 @@ def test_pin_models_preserves_comments_and_skips_existing_pins(project):
         return_value=io.BytesIO(json.dumps({"sha": revision}).encode()),
     ) as request:
         cli.pin_models(config, path)
-        assert request.call_count == 1  # The bundled judge is already pinned.
+        assert request.call_count == 1  # Rule evaluation does not resolve a judge model.
     pinned, _ = load_config(project)
     assert pinned["models"]["model_1"]["revision"] == revision
     assert "# Fill these later." in path.read_text()
@@ -60,8 +62,7 @@ def test_pin_models_preserves_comments_and_skips_existing_pins(project):
 
 def test_pin_models_has_no_partial_write_on_remote_failure(project):
     config, path = load_config(project)
-    text = path.read_text().replace('hf_id = ""', 'hf_id = "example/model"', 1)
-    text = text.replace(config["judge"]["revision"], "")
+    text = path.read_text().replace('hf_id = ""', 'hf_id = "example/model"', 2)
     path.write_text(text)
     config, path = load_config(project)
     with patch.object(
@@ -99,6 +100,9 @@ def make_run_context(project, config, fold_ids=(1, 2, 3, 4, 5)):
 
 def test_run_reuses_one_target_then_unloads_before_one_judge(project):
     config, path = configured(project)
+    # Legacy classifier runs still release target weights before loading the judge.
+    config["judge"] = {"hf_id": "cais/HarmBench-Llama-2-13b-cls", "revision": "b" * 40}
+    config["evaluation"]["over_refusal"] = False
     calls = []
     run = make_run_context(project, config)
 
@@ -235,3 +239,42 @@ def test_legacy_split_flag_is_rejected():
     with pytest.raises(SystemExit) as error:
         cli.parser().parse_args(["run", "--model", "model_1", "--run-id", "x", "--split", "dev"])
     assert error.value.code == 2
+
+
+def test_transfer_context_is_selected_only_for_all_fold_commands():
+    fold, transfer = {"fold": 1}, {"scope": "transfer"}
+    run = {"fold_runs": [fold], "transfer_run": transfer, "selected_fold": None}
+    assert cli._selected_runs(run) == [fold, transfer]
+    run["selected_fold"] = 1
+    assert cli._selected_runs(run) == [fold]
+
+
+def test_rule_scoring_never_loads_classifier_or_environment(project):
+    config, _ = configured(project)
+    run = make_run_context(project, config, (1,))
+    with (
+        patch.object(evaluate, "HarmBenchJudge", side_effect=AssertionError("No classifier")),
+        patch.object(experiment, "_environment", side_effect=AssertionError("No GPU environment")),
+        patch.object(experiment, "_validated_records", return_value=({"fold:1:job": {}}, {})),
+        patch.object(experiment, "score") as score,
+    ):
+        cli._score_folds(run)
+    assert isinstance(score.call_args.args[1], evaluate.RuleJudge)
+
+
+def test_transfer_command_runs_only_final_context(project):
+    config, path = configured(project)
+    run = make_run_context(project, config)
+    transfer = {"directory": run["directory"] / "transfer"}
+    run["transfer_run"] = transfer
+    with (
+        patch.object(cli, "load_config", return_value=(config, path)),
+        patch.object(experiment, "setup_run", return_value=run),
+        patch.object(cli, "_run_target_folds") as target,
+        patch.object(cli, "_score_folds") as score,
+        patch.object(experiment, "summarize_transfer", return_value={"complete": True}),
+        patch.object(experiment, "summarize_oof", side_effect=AssertionError("No OOF work")),
+    ):
+        assert cli.main(["--root", str(project), "transfer", "--model", "model_1", "--run-id", "x"]) == 0
+    assert cli._selected_runs(target.call_args.args[0]) == [transfer]
+    assert cli._selected_runs(score.call_args.args[0]) == [transfer]

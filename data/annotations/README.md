@@ -2,6 +2,13 @@
 
 `severity.csv`는 **AI_initial_v1** 버전의 주관적인 초기 분류입니다. HarmBench가 제공한 공식 위해도, 검증된 척도, 사람의 검토를 마친 정답 라벨이 아닙니다. 필요에 따라 CSV의 `level`과 `rationale`을 수정할 수 있습니다.
 
+외부 평가의 `external_severity.csv`도 별도의 AI 초기 주석이다. JBB Original 55개를
+내용에 따라 주석화하고, HarmBench와 핵심 행동이 겹친다는 AI 초기 판단 9개를 근거와
+함께 제외했다. 최종 harmful 46개는 L1 9·L2 28·L3 9이며, 독립 benign 100개 중 가까운
+문구 중복 1개를 제외해 99개를 평가한다. 자세한 provenance와 의미 중복 검사의 한계는
+[EXTERNAL.md](EXTERNAL.md)와 `external_provenance.json`을 참조한다. 공식 severity나
+완전한 의미적 독립성을 주장하지 않는다.
+
 ## 대상과 출처
 
 - 원본: [HarmBench text behaviors](https://github.com/centerforaisafety/HarmBench/blob/8e1604d1171fe8a48d8febecd22f600e462bdcdd/data/behavior_datasets/harmbench_behaviors_text_all.csv).

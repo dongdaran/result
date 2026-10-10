@@ -7,6 +7,47 @@ from pathlib import Path
 
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 SAFE_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}\Z")
+RULE_VERSION = "gcg_refusal_v1"
+
+
+def _validate_judge(judge: dict) -> None:
+    method = judge.get("method", "harmbench")
+    if method == "rule":
+        if judge.get("version") != RULE_VERSION:
+            raise ValueError(f"judge.version must be {RULE_VERSION!r} for rule scoring")
+    elif method == "harmbench":
+        if judge.get("hf_id") != "cais/HarmBench-Llama-2-13b-cls":
+            raise ValueError("The classifier evaluator requires the official HarmBench 13B model")
+    else:
+        raise ValueError("judge.method must be rule/harmbench")
+
+
+def _validate_evaluation(config: dict) -> None:
+    evaluation = config.get("evaluation", {})
+    over_refusal = evaluation.get("over_refusal", False)
+    if type(over_refusal) is not bool:
+        raise ValueError("evaluation.over_refusal must be true/false")
+    if over_refusal and config["judge"].get("method", "harmbench") != "rule":
+        raise ValueError("evaluation.over_refusal requires rule scoring (1 - ASR_rule)")
+    external = config.get("external", {})
+    enabled = external.get("enabled", False)
+    if type(enabled) is not bool:
+        raise ValueError("external.enabled must be true/false")
+    if not enabled:
+        return
+    if config["judge"].get("method", "harmbench") != "rule":
+        raise ValueError("external.enabled requires rule scoring (ASR_rule)")
+    if external.get("source") != "jailbreakbench_original":
+        raise ValueError("external.source must be jailbreakbench_original")
+    revision = external.get("revision", "")
+    if not isinstance(revision, str) or not COMMIT.fullmatch(revision):
+        raise ValueError("external.revision must be a full commit SHA")
+    for key in ("harmful_sha256", "benign_sha256"):
+        digest = external.get(key, "")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"Invalid external.{key}")
+    if not isinstance(external.get("labels_path"), str) or not external["labels_path"].strip():
+        raise ValueError("external.labels_path must name the external severity annotations")
 
 
 def load_config(root: Path, path: str | None = None) -> tuple[dict, Path]:
@@ -64,8 +105,8 @@ def load_config(root: Path, path: str | None = None) -> tuple[dict, Path]:
         raise ValueError("steering.coefficient must be finite")
     if type(config["steering"]["normalize"]) is not bool:
         raise ValueError("steering.normalize must be true/false")
-    if config["judge"]["hf_id"] != "cais/HarmBench-Llama-2-13b-cls":
-        raise ValueError("This initial evaluator supports the official HarmBench 13B classifier")
+    _validate_judge(config["judge"])
+    _validate_evaluation(config)
     return config, config_path
 
 
@@ -80,6 +121,9 @@ def require_model(config: dict, key: str) -> dict:
 
 def require_judge(config: dict) -> dict:
     judge = config["judge"]
+    _validate_judge(judge)
+    if judge.get("method", "harmbench") == "rule":
+        return judge
     if not COMMIT.fullmatch(judge.get("revision", "")):
         raise ValueError("Pin judge.revision with ./scripts/pin-models first")
     return judge

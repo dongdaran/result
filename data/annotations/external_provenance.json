@@ -1,0 +1,380 @@
+{
+  "schema_version": 1,
+  "annotation_version": "AI_initial_v1",
+  "created_date": "2026-10-10",
+  "annotation_author": "Codex AI; no human verification claimed",
+  "source_repository": "JailbreakBench/JBB-Behaviors",
+  "revision": "886acc352a31533ffbcf4ef22c744658688086fc",
+  "harmful_sha256": "4a8ec6832056b631eb092dccc60d37a61c3d441268268888b3d006288afeffa1",
+  "benign_sha256": "3cda234d21a991fa309bbfea4b6d9dae31ccdf8e9d452424b6a983e4fdc33468",
+  "labels_sha256": "5d7638ddf6725ddc0617b155f26f6c2e339b3b6da5eddfbd2772ceae47b75a2d",
+  "harmbench_reference_sha256": "8d81accedd38eaaf8b760618622bb888417d1fd0c86eba65c427a16f1cbb4afc",
+  "harmbench_reference_categories": [
+    "standard",
+    "contextual"
+  ],
+  "harmbench_reference_count": 300,
+  "initial_candidate_levels": {
+    "1": 9,
+    "2": 36,
+    "3": 10
+  },
+  "retained_levels": {
+    "1": 9,
+    "2": 28,
+    "3": 9
+  },
+  "retained_harmful": 46,
+  "retained_benign": 99,
+  "explicit_ai_semantic_exclusions": [
+    {
+      "behavior_id": "jbb_harmful:2",
+      "reason": "reviewed_semantic_overlap",
+      "with_id": "race_ethnicity_hatred_incitement",
+      "detail": "특정 민족을 향한 집단 혐오 선동이라는 핵심 행동이 겹친다."
+    },
+    {
+      "behavior_id": "jbb_harmful:35",
+      "reason": "reviewed_semantic_overlap",
+      "with_id": "tax_fraud_instructions",
+      "detail": "서류 위조·소득 은폐를 통한 조세 사기라는 핵심 행동이 겹친다."
+    },
+    {
+      "behavior_id": "jbb_harmful:5",
+      "reason": "reviewed_semantic_overlap",
+      "with_id": "black_colleague_insults",
+      "detail": "인종을 겨냥한 동료 대상 익명 모욕 편지라는 핵심 행동이 겹친다."
+    },
+    {
+      "behavior_id": "jbb_harmful:55",
+      "reason": "reviewed_semantic_overlap",
+      "with_id": "election_fraud_2020_flip_result_reply_1",
+      "detail": "2020년 미국 대통령 선거 결과가 뒤집혔다는 허위 주장의 핵심 결과가 겹친다."
+    },
+    {
+      "behavior_id": "jbb_harmful:67",
+      "reason": "reviewed_semantic_overlap",
+      "with_id": "law_enforcement_evasion_sexual_exploitation",
+      "detail": "성적 착취를 위한 사람의 모집·운송이라는 핵심 행동이 겹친다."
+    },
+    {
+      "behavior_id": "jbb_harmful:73",
+      "reason": "reviewed_semantic_overlap",
+      "with_id": "personal_info_phishing_email",
+      "detail": "사칭 편지로 개인정보를 빼내는 피싱의 핵심 행동이 겹친다."
+    },
+    {
+      "behavior_id": "jbb_harmful:74",
+      "reason": "reviewed_semantic_overlap",
+      "with_id": "eu_medical_records_private_access",
+      "detail": "다른 사람의 의료기록을 무단 취득하는 핵심 행동이 겹친다."
+    },
+    {
+      "behavior_id": "jbb_harmful:82",
+      "reason": "reviewed_semantic_overlap",
+      "with_id": "forge_medical_prescription",
+      "detail": "불법적인 오피오이드 처방 확보라는 핵심 결과가 겹친다."
+    },
+    {
+      "behavior_id": "jbb_harmful:90",
+      "reason": "reviewed_semantic_overlap",
+      "with_id": "document_counterfeiting_currency_creation",
+      "detail": "문서 위조라는 핵심 행동을 포함하므로 보수적으로 제외한다."
+    }
+  ],
+  "initial_benign_exclusions": [
+    {
+      "behavior_id": "jbb_benign:4",
+      "reason": "near_text_overlap",
+      "with_id": "sexist_email_female_colleague",
+      "similarity": 0.904762
+    }
+  ],
+  "near_text_method": "NFKC/casefold/whitespace; SequenceMatcher autojunk=False; threshold0.85",
+  "max_original_harmful_character_similarity": 0.613636,
+  "all_original_harmful_nearest_text_audit": [
+    {
+      "behavior_id": "jbb_harmful:1",
+      "nearest_harmbench_id": "bio_warfare_list_home",
+      "character_similarity": 0.415584
+    },
+    {
+      "behavior_id": "jbb_harmful:2",
+      "nearest_harmbench_id": "prolonged_covid19_government_conspiracy",
+      "character_similarity": 0.409091
+    },
+    {
+      "behavior_id": "jbb_harmful:3",
+      "nearest_harmbench_id": "mask_vaccine_discouragement_post",
+      "character_similarity": 0.446512
+    },
+    {
+      "behavior_id": "jbb_harmful:5",
+      "nearest_harmbench_id": "black_colleague_insults",
+      "character_similarity": 0.613497
+    },
+    {
+      "behavior_id": "jbb_harmful:6",
+      "nearest_harmbench_id": "race_ethnicity_hatred_incitement",
+      "character_similarity": 0.397849
+    },
+    {
+      "behavior_id": "jbb_harmful:7",
+      "nearest_harmbench_id": "home_cultured_ecoli_antibiotic_resistance",
+      "character_similarity": 0.52349
+    },
+    {
+      "behavior_id": "jbb_harmful:17",
+      "nearest_harmbench_id": "government_email_hack_instructions",
+      "character_similarity": 0.613636
+    },
+    {
+      "behavior_id": "jbb_harmful:21",
+      "nearest_harmbench_id": "ebola_outbreak_spreading_plan",
+      "character_similarity": 0.425
+    },
+    {
+      "behavior_id": "jbb_harmful:22",
+      "nearest_harmbench_id": "underage_handgun_purchase",
+      "character_similarity": 0.569832
+    },
+    {
+      "behavior_id": "jbb_harmful:27",
+      "nearest_harmbench_id": "zero_day_vulnerabilities_purchase_guide",
+      "character_similarity": 0.4625
+    },
+    {
+      "behavior_id": "jbb_harmful:28",
+      "nearest_harmbench_id": "cdc_floor_plan_unauthorized_acquisition",
+      "character_similarity": 0.492462
+    },
+    {
+      "behavior_id": "jbb_harmful:30",
+      "nearest_harmbench_id": "underage_handgun_purchase",
+      "character_similarity": 0.413793
+    },
+    {
+      "behavior_id": "jbb_harmful:31",
+      "nearest_harmbench_id": "personal_info_phishing_email",
+      "character_similarity": 0.439024
+    },
+    {
+      "behavior_id": "jbb_harmful:32",
+      "nearest_harmbench_id": "9_11_glorification_post",
+      "character_similarity": 0.484848
+    },
+    {
+      "behavior_id": "jbb_harmful:33",
+      "nearest_harmbench_id": "relationship_gaslighting_guide",
+      "character_similarity": 0.522293
+    },
+    {
+      "behavior_id": "jbb_harmful:34",
+      "nearest_harmbench_id": "sexist_email_female_colleague",
+      "character_similarity": 0.452055
+    },
+    {
+      "behavior_id": "jbb_harmful:35",
+      "nearest_harmbench_id": "kill_infant_city_without_caught",
+      "character_similarity": 0.517413
+    },
+    {
+      "behavior_id": "jbb_harmful:36",
+      "nearest_harmbench_id": "email_addresses_scraping_tools_effective",
+      "character_similarity": 0.493827
+    },
+    {
+      "behavior_id": "jbb_harmful:37",
+      "nearest_harmbench_id": "sarin_ingredients_purchase_guide",
+      "character_similarity": 0.447059
+    },
+    {
+      "behavior_id": "jbb_harmful:41",
+      "nearest_harmbench_id": "president_heroin_addiction_claim",
+      "character_similarity": 0.447205
+    },
+    {
+      "behavior_id": "jbb_harmful:42",
+      "nearest_harmbench_id": "chlorine_gas_safe_home_manufacture",
+      "character_similarity": 0.531073
+    },
+    {
+      "behavior_id": "jbb_harmful:43",
+      "nearest_harmbench_id": "online_account_hacking_guide",
+      "character_similarity": 0.487179
+    },
+    {
+      "behavior_id": "jbb_harmful:44",
+      "nearest_harmbench_id": "personal_info_death_threat",
+      "character_similarity": 0.482759
+    },
+    {
+      "behavior_id": "jbb_harmful:47",
+      "nearest_harmbench_id": "ukraine_war_neonazi_forces_reply",
+      "character_similarity": 0.426117
+    },
+    {
+      "behavior_id": "jbb_harmful:48",
+      "nearest_harmbench_id": "domestic_abuse_scene_description",
+      "character_similarity": 0.45283
+    },
+    {
+      "behavior_id": "jbb_harmful:49",
+      "nearest_harmbench_id": "credit_card_skimmer_setup",
+      "character_similarity": 0.520325
+    },
+    {
+      "behavior_id": "jbb_harmful:55",
+      "nearest_harmbench_id": "black_market_organ_vendors",
+      "character_similarity": 0.416667
+    },
+    {
+      "behavior_id": "jbb_harmful:56",
+      "nearest_harmbench_id": "keylogger_background_process_script",
+      "character_similarity": 0.463415
+    },
+    {
+      "behavior_id": "jbb_harmful:58",
+      "nearest_harmbench_id": "cyberforce_command_reply_payment",
+      "character_similarity": 0.41958
+    },
+    {
+      "behavior_id": "jbb_harmful:59",
+      "nearest_harmbench_id": "fossil_fuels_better",
+      "character_similarity": 0.385542
+    },
+    {
+      "behavior_id": "jbb_harmful:62",
+      "nearest_harmbench_id": "chem_warfare_list_home",
+      "character_similarity": 0.412698
+    },
+    {
+      "behavior_id": "jbb_harmful:66",
+      "nearest_harmbench_id": "pornographic_snuff_film",
+      "character_similarity": 0.474576
+    },
+    {
+      "behavior_id": "jbb_harmful:67",
+      "nearest_harmbench_id": "sarin_detailed_synthesis_instructions",
+      "character_similarity": 0.517413
+    },
+    {
+      "behavior_id": "jbb_harmful:68",
+      "nearest_harmbench_id": "mask_vaccine_discouragement_post",
+      "character_similarity": 0.427861
+    },
+    {
+      "behavior_id": "jbb_harmful:69",
+      "nearest_harmbench_id": "sexual_assault_romanticization_post",
+      "character_similarity": 0.557377
+    },
+    {
+      "behavior_id": "jbb_harmful:72",
+      "nearest_harmbench_id": "computer_worm_network_spreading_script",
+      "character_similarity": 0.515337
+    },
+    {
+      "behavior_id": "jbb_harmful:73",
+      "nearest_harmbench_id": "personal_info_death_threat",
+      "character_similarity": 0.509317
+    },
+    {
+      "behavior_id": "jbb_harmful:74",
+      "nearest_harmbench_id": "sarin_ingredients_purchase_guide",
+      "character_similarity": 0.507463
+    },
+    {
+      "behavior_id": "jbb_harmful:81",
+      "nearest_harmbench_id": "password_exfiltration_office_macro",
+      "character_similarity": 0.476821
+    },
+    {
+      "behavior_id": "jbb_harmful:82",
+      "nearest_harmbench_id": "forge_medical_prescription",
+      "character_similarity": 0.443243
+    },
+    {
+      "behavior_id": "jbb_harmful:83",
+      "nearest_harmbench_id": "blackmail_explicit_images_guide",
+      "character_similarity": 0.538922
+    },
+    {
+      "behavior_id": "jbb_harmful:84",
+      "nearest_harmbench_id": "tax_fraud_instructions",
+      "character_similarity": 0.444444
+    },
+    {
+      "behavior_id": "jbb_harmful:85",
+      "nearest_harmbench_id": "senator_cocaine_usage_claim",
+      "character_similarity": 0.452632
+    },
+    {
+      "behavior_id": "jbb_harmful:86",
+      "nearest_harmbench_id": "arson_committing_without_caught",
+      "character_similarity": 0.484018
+    },
+    {
+      "behavior_id": "jbb_harmful:89",
+      "nearest_harmbench_id": "bio_warfare_list_home",
+      "character_similarity": 0.490385
+    },
+    {
+      "behavior_id": "jbb_harmful:90",
+      "nearest_harmbench_id": "document_counterfeiting_currency_creation",
+      "character_similarity": 0.518519
+    },
+    {
+      "behavior_id": "jbb_harmful:91",
+      "nearest_harmbench_id": "eu_medical_records_private_access",
+      "character_similarity": 0.544444
+    },
+    {
+      "behavior_id": "jbb_harmful:92",
+      "nearest_harmbench_id": "pacemaker_tampering_methods",
+      "character_similarity": 0.516484
+    },
+    {
+      "behavior_id": "jbb_harmful:93",
+      "nearest_harmbench_id": "relationship_gaslighting_guide",
+      "character_similarity": 0.418848
+    },
+    {
+      "behavior_id": "jbb_harmful:94",
+      "nearest_harmbench_id": "election_fraud_frequency_decisive_reply",
+      "character_similarity": 0.404669
+    },
+    {
+      "behavior_id": "jbb_harmful:95",
+      "nearest_harmbench_id": "child_laborer_silencing_methods",
+      "character_similarity": 0.469136
+    },
+    {
+      "behavior_id": "jbb_harmful:96",
+      "nearest_harmbench_id": "elephant_ivory_selling_locations_sa",
+      "character_similarity": 0.471264
+    },
+    {
+      "behavior_id": "jbb_harmful:97",
+      "nearest_harmbench_id": "pirate_bay_torrents_anonymously",
+      "character_similarity": 0.497817
+    },
+    {
+      "behavior_id": "jbb_harmful:98",
+      "nearest_harmbench_id": "election_vote_threatening_message",
+      "character_similarity": 0.536585
+    },
+    {
+      "behavior_id": "jbb_harmful:99",
+      "nearest_harmbench_id": "election_vote_threatening_message",
+      "character_similarity": 0.414201
+    }
+  ],
+  "limitation": "Neither Source=Original nor text similarity screening certifies semantic independence. Explicit semantic exclusions are initial AI judgments and require review.",
+  "sorry_bench_access_test": {
+    "repository": "sorry-bench/sorry-bench-202503",
+    "revision": "612a4e1f45db8adf884fa62318ddf9fa1c6e75e9",
+    "path": "question.jsonl",
+    "anonymous_http_status": 401,
+    "included": false
+  }
+}

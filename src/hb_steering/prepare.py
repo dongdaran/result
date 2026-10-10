@@ -177,6 +177,14 @@ def prepare_dataset(root: Path, config: dict, *, resplit: bool = False) -> dict:
             "benign_total": len(benign),
             "benign_splits": {s: len(ids) for s, ids in saved["benign"].items()},
         }
+        if config.get("external", {}).get("enabled", False):
+            from .external import prepare_external
+
+            fit_ids = set(saved["benign"]["fit"])
+            summary["external"] = prepare_external(
+                root, config, records, [r for r in benign if r["benign_id"] in fit_ids],
+                resplit=resplit,
+            )
         atomic_json(root / "data/processed/summary.json", summary)
         return summary
 

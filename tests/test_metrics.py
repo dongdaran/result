@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from hb_steering.metrics import summarize_cells, wilson_interval
+from hb_steering.metrics import summarize_cells, summarize_over_refusal, wilson_interval
 
 
 def make_inputs(layers=(-1,), counts=(4, 2, 1)):
@@ -215,3 +215,136 @@ def test_invalid_layer_configuration_is_rejected(layers):
     inputs[3] = layers
     with pytest.raises(ValueError, match="Layers"):
         summarize_cells(*inputs)
+
+
+def test_explicit_rule_fields_preserve_counts_without_mislabeling_classifiers():
+    inputs = make_inputs()
+    legacy = summarize_cells(*inputs)[0]
+    assert legacy["metric"] == "asr_harmbench"
+    assert legacy["asr_rule"] is legacy["baseline_asr_rule"] is legacy["delta_asr_rule"] is None
+    row = summarize_cells(*inputs, evaluation_method="rule")[0]
+    assert row["metric"] == "asr_rule"
+    assert row["evaluation_method"] == "rule"
+    assert row["asr_rule"] == row["asr"] == row["baseline_asr_rule"] == 0.5
+    assert row["delta_asr_rule"] == 0.0
+    assert (row["asr_rule_ci_low"], row["asr_rule_ci_high"]) == wilson_interval(2, 4)
+
+
+def safe_inputs(datasets=("xstest_safe", "jailbreakbench_benign"), layers=(-1,)):
+    jobs = []
+    for dataset in datasets:
+        for index in range(4):
+            ident = f"{dataset}:prompt{index}"
+            for source, layer in [(0, None)] + [
+                (source, layer) for source in (1, 2, 3) for layer in layers
+            ]:
+                jobs.append(
+                    {
+                        "key": f"{dataset}:{source}:{layer}:{index}",
+                        "behavior_id": ident,
+                        "dataset": dataset,
+                        "target_level": 0,
+                        "source_level": source,
+                        "layer": layer,
+                    }
+                )
+    generations = {job["key"]: {**job, "generation": "A response."} for job in jobs}
+    scores = {
+        job["key"]: {
+            **job,
+            "success": job["behavior_id"].endswith(("0", "1")),
+        }
+        for job in jobs
+    }
+    return jobs, generations, scores, list(layers)
+
+
+def test_over_refusal_uses_safe_prompt_denominators_and_independent_dataset_baselines():
+    inputs = safe_inputs(layers=(-1, 0))
+    first = next(
+        job for job in inputs[0] if job["source_level"] == 1 and job["layer"] == -1
+    )
+    inputs[2][first["key"]]["success"] = False
+    rows = summarize_over_refusal(*inputs)
+    assert len(rows) == 2 * (1 + 3 * 2)
+    cells = {(row["dataset"], row["source_level"], row["layer"]): row for row in rows}
+    changed = cells[("xstest_safe", 1, -1)]
+    assert changed["n_expected"] == changed["n_generated"] == changed["n_scored"] == 4
+    assert changed["n_refused"] == 3
+    assert changed["over_refusal"] == changed["over_refusal_rule"] == 0.75
+    assert changed["baseline_over_refusal"] == 0.5
+    assert changed["delta_over_refusal"] == 0.25
+    assert changed["non_refusal_rate_rule"] == 0.25
+    assert (changed["over_refusal_ci_low"], changed["over_refusal_ci_high"]) == wilson_interval(3, 4)
+    assert cells[("jailbreakbench_benign", 1, -1)]["over_refusal"] == 0.5
+    assert all("target_level" not in row and row["metric"] == "over_refusal_rule" for row in rows)
+
+
+def test_missing_safe_judgments_and_generations_withhold_rates_and_baseline_delta():
+    inputs = safe_inputs(datasets=("xstest_safe",))
+    baseline = next(job for job in inputs[0] if job["source_level"] == 0)
+    del inputs[1][baseline["key"]]
+    del inputs[2][baseline["key"]]
+    steered = next(job for job in inputs[0] if job["source_level"] == 3)
+    del inputs[2][steered["key"]]
+    rows = {row["source_level"]: row for row in summarize_over_refusal(*inputs)}
+    assert rows[0]["n_generated"] == rows[0]["n_scored"] == 3
+    assert rows[0]["n_expected"] == 4
+    assert rows[0]["complete"] is False
+    assert rows[0]["over_refusal"] is rows[0]["over_refusal_ci_low"] is None
+    assert rows[1]["over_refusal"] == 0.5
+    assert rows[1]["baseline_over_refusal"] is rows[1]["delta_over_refusal"] is None
+    assert rows[3]["n_generated"] == 4 and rows[3]["n_scored"] == 3
+    assert rows[3]["over_refusal"] is rows[3]["over_refusal_ci_high"] is None
+
+
+def test_over_refusal_empty_conditions_do_not_count_zero_refusals():
+    inputs = safe_inputs(datasets=("xstest_safe",))
+    kept = [job for job in inputs[0] if job["source_level"] != 3]
+    rows = summarize_over_refusal(
+        kept,
+        {job["key"]: inputs[1][job["key"]] for job in kept},
+        {job["key"]: inputs[2][job["key"]] for job in kept},
+        inputs[3],
+    )
+    assert rows[-1]["n_expected"] == 0
+    assert rows[-1]["complete"] is False and rows[-1]["over_refusal"] is None
+    assert summarize_over_refusal([], {}, {}, [-1]) == []
+
+
+@pytest.mark.parametrize("generation", [{"error": "OOM"}, {"generation": ""}])
+def test_failed_rule_generation_cannot_be_converted_to_normal_refusal(generation):
+    inputs = safe_inputs(datasets=("xstest_safe",))
+    key = inputs[0][0]["key"]
+    inputs[1][key] = generation
+    inputs[2][key]["success"] = False
+    with pytest.raises(ValueError, match="successful nonempty generation"):
+        summarize_over_refusal(*inputs)
+
+
+def test_over_refusal_rejects_duplicate_prompts_harmful_labels_and_classifier_scores():
+    inputs = safe_inputs(datasets=("xstest_safe",))
+    duplicate = deepcopy(inputs[0][0])
+    duplicate["key"] += ":repeat"
+    inputs[0].append(duplicate)
+    with pytest.raises(ValueError, match="Duplicate safe prompt"):
+        summarize_over_refusal(*inputs)
+    inputs[0].pop()
+    inputs[0][0]["target_level"] = 1
+    with pytest.raises(ValueError, match="safe target_level"):
+        summarize_over_refusal(*inputs)
+    inputs[0][0]["target_level"] = 0
+    with pytest.raises(ValueError, match="rule refusal scores"):
+        summarize_over_refusal(*inputs, evaluation_method="harmbench")
+
+
+def test_over_refusal_rejects_unknown_scores_and_inconsistent_refusal_flags():
+    inputs = safe_inputs(datasets=("xstest_safe",))
+    first = inputs[0][0]["key"]
+    inputs[2][first]["refused"] = inputs[2][first]["success"]
+    with pytest.raises(ValueError, match="complementary"):
+        summarize_over_refusal(*inputs)
+    del inputs[2][first]["refused"]
+    del inputs[1][first]
+    with pytest.raises(ValueError, match="Unexpected generation/judgment keys"):
+        summarize_over_refusal(*inputs)
