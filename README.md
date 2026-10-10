@@ -38,7 +38,9 @@ GPU Pod에서 저장소를 clone하고 프로젝트 디렉터리에서 실행합
 
 `runpod-setup`은 필요한 경우 `uv`를 설치하고 `uv sync --frozen --extra gpu --extra dev`와 환경 preflight를 실행합니다. Linux 잠금 파일의 PyTorch는 CUDA 13 계열이므로 Pod의 NVIDIA 드라이버 호환성을 확인합니다. 일반적으로 R580 이상이 필요하며, `preflight`가 CUDA 사용 가능 여부를 확인합니다. [NVIDIA 호환성 표](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)
 
-`configs/experiment.toml`의 `models.model_1`, `model_2`, `model_3`에 실험할 실제 Hugging Face ID를 입력합니다. 모델 ID를 추정해서 채우지 않습니다.
+모델 계열과 담당자는 **Qwen: 민정·승민 (`model_1`), Llama: 재민·도윤 (`model_2`), Gemma: 세진·한비 (`model_3`)**로 정했습니다. 각 조가 내부·외부 3×3와 over-refusal 전체 평가를 맡고, 같은 모델/run ID는 한 번에 한 명만 실행합니다. 자세한 분담은 [팀 실험 가이드](docs/team-experiments.md)를 참고합니다.
+
+각 계열의 버전·파라미터 크기·정확한 checkpoint는 아직 지정하지 않았습니다. `configs/experiment.toml`의 `models.model_1`, `model_2`, `model_3`에 합의한 실제 Hugging Face ID를 입력합니다. 모델 ID를 추정해서 채우지 않습니다.
 
 ```toml
 [models.model_1]

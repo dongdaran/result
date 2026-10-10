@@ -30,16 +30,19 @@ labels_path = "data/annotations/external_severity.csv"
 
 # Fill these later. A full commit SHA is required for GPU runs.
 # ./scripts/pin-models resolves the configured HF IDs to commit SHAs.
+# Qwen: 민정, 승민. Exact version/size/checkpoint remains to be selected.
 [models.model_1]
 hf_id = ""
 revision = ""
 dtype = "auto"
 
+# Llama: 재민, 도윤. Exact version/size/checkpoint remains to be selected.
 [models.model_2]
 hf_id = ""
 revision = ""
 dtype = "auto"
 
+# Gemma: 세진, 한비. Exact version/size/checkpoint remains to be selected.
 [models.model_3]
 hf_id = ""
 revision = ""

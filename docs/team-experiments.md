@@ -2,14 +2,18 @@
 
 ## 실험 분담
 
-한 명이 한 모델의 L1/L2/L3 전체 평가를 맡습니다. 벡터 레벨로 사람을 나누면 동일 모델의 추출·baseline을 중복하게 되고 같은 출력의 잠금과 충돌할 수 있습니다. 모델이 세 개라면 아래처럼 나눕니다.
+각 모델 계열을 두 명씩 맡아 L1/L2/L3 전체 평가를 함께 진행합니다. 확정된 배정은 다음과 같습니다.
 
-| 담당자 | 모델 key | 담당 범위 |
-| --- | --- | --- |
-| 팀원 A | `model_1` | OOF fold 1~5 + 외부 3×3 + safe over-refusal |
-| 팀원 B | `model_2` | OOF fold 1~5 + 외부 3×3 + safe over-refusal |
-| 팀원 C | `model_3` | OOF fold 1~5 + 외부 3×3 + safe over-refusal |
-| 공동 검토 | 모든 모델 | 레벨 근거·설정 고정·응답 표본 검수·최종 집계 |
+| 모델 계열 | 담당자 | 모델 key | 담당 범위 |
+| --- | --- | --- | --- |
+| Qwen | 민정 · 승민 | `model_1` | OOF fold 1~5 + 외부 3×3 + safe over-refusal |
+| Llama | 재민 · 도윤 | `model_2` | OOF fold 1~5 + 외부 3×3 + safe over-refusal |
+| Gemma | 세진 · 한비 | `model_3` | OOF fold 1~5 + 외부 3×3 + safe over-refusal |
+| 공동 검토 | 전체 팀원 | 모든 모델 | 레벨 근거·설정 고정·응답 표본 검수·최종 집계 |
+
+각 조에서 실행·검수 담당을 정하고 같은 모델/run ID의 실험 명령은 한 번에 하나만 실행합니다. 같은 출력 폴더에서 fold나 벡터 레벨을 나누어 동시에 실행하면 모델 단위 잠금과 충돌합니다. 서로 다른 모델 조는 병렬 실행할 수 있고, 로그·응답의 읽기 검수는 함께 진행할 수 있습니다.
+
+현재 확정된 것은 모델 계열과 담당자입니다. 각 계열의 버전·파라미터 크기·정확한 Hugging Face checkpoint ID와 revision은 본실험 전에 따로 확정합니다.
 
 L3 입력에 L1 벡터를 적용하는 실험은 `source_level=1`, `target_level=3`입니다. 각 모델이 만드는 내부와 외부 3×3에는 이런 교차 조합을 모두 포함합니다. baseline에는 벡터를 적용하지 않습니다.
 
@@ -31,7 +35,7 @@ HarmBench와 외부 레벨은 프로젝트의 AI 초기 라벨입니다. 평가 
 
 ## 팀원별 실행 명령
 
-저장소를 clone한 뒤 팀에서 합의한 commit을 사용합니다. `configs/experiment.toml`에 세 모델 ID와 고정 revision을 공유해 두고 자신의 모델 key만 명령에서 바꿉니다. 아래는 팀원 A의 예시입니다.
+저장소를 clone한 뒤 팀에서 합의한 commit을 사용합니다. `configs/experiment.toml`에 세 모델 ID와 고정 revision을 공유해 두고 자신의 모델 key만 명령에서 바꿉니다. 아래는 Qwen 조(민정·승민)의 예시입니다. Llama 조는 `model_2`, Gemma 조는 `model_3`를 사용합니다.
 
 ```sh
 ./scripts/runpod-setup

@@ -29,7 +29,7 @@ fit 150개는 benign activation 기준, dev 50개는 보존, test 50개는 과�
 
 ## Hugging Face 모델
 
-target 모델은 아직 선택하지 않았다. 각 모델 및 `cais/HarmBench-Llama-2-13b-cls`의 접근 조건·라이선스는 해당 Hugging Face model repository에서 확인한다. 이 프로젝트는 모델 가중치를 번들하거나 모델 라이선스를 재정의하지 않는다.
+target 모델 계열은 Qwen, Llama, Gemma이며 정확한 버전·크기·checkpoint는 아직 선택하지 않았다. 각 모델 및 선택적 `cais/HarmBench-Llama-2-13b-cls`의 접근 조건·라이선스는 해당 Hugging Face model repository에서 확인한다. 이 프로젝트는 모델 가중치를 번들하거나 모델 라이선스를 재정의하지 않는다.
 
 ## GCG 거부 문자열 규칙
 
