@@ -58,6 +58,14 @@ def load_config(root: Path, path: str | None = None) -> tuple[dict, Path]:
         config = tomllib.load(stream)
     if config.get("schema_version") != 1:
         raise ValueError("Unsupported config schema_version")
+    if "models" in config:
+        raise ValueError("Move target models to pyproject.toml [tool.hb-steering.models]")
+    with (root / "pyproject.toml").open("rb") as stream:
+        project = tomllib.load(stream)
+    models = project.get("tool", {}).get("hb-steering", {}).get("models")
+    if not isinstance(models, dict) or not models:
+        raise ValueError("Missing pyproject.toml [tool.hb-steering.models] configuration")
+    config["models"] = models
     for section in ("dataset", "models", "runtime", "steering", "judge"):
         if section not in config:
             raise ValueError(f"Missing config section: {section}")
@@ -93,7 +101,9 @@ def load_config(root: Path, path: str | None = None) -> tuple[dict, Path]:
     runtime = config["runtime"]
     if runtime["device"] not in {"cuda", "cpu"}:
         raise ValueError("runtime.device must be cuda/cpu")
-    for key in ("max_input_tokens", "max_new_tokens"):
+    for key in ("max_input_tokens", "max_new_tokens", "batch_size"):
+        if key == "batch_size" and key not in runtime:
+            runtime[key] = 1
         if type(runtime[key]) is not int or runtime[key] <= 0:
             raise ValueError(f"runtime.{key} must be a positive integer")
     if runtime.get("do_sample", False):
@@ -113,7 +123,7 @@ def load_config(root: Path, path: str | None = None) -> tuple[dict, Path]:
 def require_model(config: dict, key: str) -> dict:
     model = config["models"].get(key)
     if not model or not str(model.get("hf_id", "")).strip():
-        raise ValueError(f"Set models.{key}.hf_id in configs/experiment.toml first")
+        raise ValueError(f"Set models.{key}.hf_id in pyproject.toml [tool.hb-steering.models] first")
     if not COMMIT.fullmatch(model.get("revision", "")):
         raise ValueError(f"Pin models.{key}.revision with ./scripts/pin-models first")
     return model

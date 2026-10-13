@@ -6,7 +6,7 @@
 
 ## 코드와 실행 원칙
 
-- `uv`, `pyproject.toml`, `uv.lock`을 사용한다. Python 지원 범위를 지키고 잠금 파일을 임의로 무시하지 않는다. 새 의존성은 필요한 이유가 있을 때만 추가한다.
+- 사용자 요청에 따라 `uv`와 `pyproject.toml`을 사용하고 모델 ID·revision은 `[tool.hb-steering.models]`에 지정한다. `uv.lock`은 추적하지 않는다. Python 지원 범위를 지키고 run에 실제 설치 패키지 버전과 설정 snapshot을 보존한다. 새 의존성은 필요한 이유가 있을 때만 추가한다.
 - 명령은 작은 단위로 나눈다. 데이터 준비, 벡터 추출, 생성, 판정, 집계를 각각 재실행할 수 있어야 한다. 스크립트는 호출한 작업 디렉터리에 의존하지 않는다.
 - 모델 ID를 추정해서 채우지 않는다. 실제 GPU 실험은 target의 전체 revision SHA가 명시돼야 한다. 기본 rule scorer는 CPU에서 실행하며 별도 모델을 로딩하지 않는다. 선택적으로 classifier를 쓰는 이전 설정은 judge의 전체 revision SHA도 명시한다. 원격 모델 코드를 자동으로 신뢰하거나 실행하지 않는다.
 - 입력 형식, 모델 구조, token 길이, 레벨 coverage, 벡터 shape, dtype, 유한한 값, CUDA 환경을 필요한 위치에서 검증한다. OOM 또는 잘림을 숨기거나 임의의 축소 설정으로 바꿔 계속하지 않는다.
@@ -36,16 +36,16 @@
 큰 GPU 실행 전에 `./scripts/check`, 관련 테스트, 모델 preflight, 작은 smoke를 순서대로 확인한다. 데이터 분리, 평균 차이, hook 적용·제거, 응답 token 분리, judge 파싱, 저장·재개 변경에는 이를 직접 검증하는 테스트를 유지한다.
 
 ```sh
-uv sync --frozen --extra gpu --extra dev
-uv run --extra gpu --extra dev pytest
-uv run --extra dev ruff check .
+uv sync --extra gpu --extra dev
+uv run --no-sync --extra gpu --extra dev pytest
+uv run --no-sync --extra dev ruff check .
 ```
 
 CPU fixture 테스트 통과를 실제 GPU 실행 성공으로 표현하지 않는다. 선택한 target 모델과 GPU에서 확인한 범위, 아직 확인하지 않은 범위를 구분한다. 설정 변경 후 새 우려가 없으면 같은 검증을 불필요하게 반복하지 않는다.
 
 ## 파일 관리
 
-- Git 추적: 소스, 테스트, 실행 스크립트, 문서, 설정, severity 라벨·근거, 고정 fold ID·metadata, `uv.lock`, 출처·라이선스.
+- Git 추적: 소스, 테스트, 실행 스크립트, 문서, 설정, severity 라벨·근거, 고정 fold ID·metadata, 출처·라이선스.
 - Git 제외: `outputs/`, 원본 다운로드와 파생 데이터, 모델 캐시, `.venv/`, credential, `.env`, 임시 `work/`.
 - 실험 산출물은 `outputs/<run_id>/<model_key>/fold_<N>/` 안에 저장하고 모델별 OOF 집계는 `<model_key>/metrics/`에 저장한다. 최종 고정 벡터 및 외부·safe 결과는 `<model_key>/transfer/` 안에 따로 저장한다. run snapshot을 삭제하거나 덮어써서 설정 불일치를 우회하지 않는다.
 - GPU 대여·인스턴스 생성은 이 저장소의 준비 작업에 포함되지 않는다. 기존 환경에서 승인된 실험을 실행하는 데 필요한 가역적인 코드 수정·검증은 계속 진행한다.

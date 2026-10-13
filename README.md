@@ -36,20 +36,36 @@ GPU Pod에서 저장소를 clone하고 프로젝트 디렉터리에서 실행합
 ./scripts/check
 ```
 
-`runpod-setup`은 필요한 경우 `uv`를 설치하고 `uv sync --frozen --extra gpu --extra dev`와 환경 preflight를 실행합니다. Linux 잠금 파일의 PyTorch는 CUDA 13 계열이므로 Pod의 NVIDIA 드라이버 호환성을 확인합니다. 일반적으로 R580 이상이 필요하며, `preflight`가 CUDA 사용 가능 여부를 확인합니다. [NVIDIA 호환성 표](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)
+`runpod-setup`은 필요한 경우 `uv`를 설치하고 `uv sync --extra gpu --extra dev`와 환경 preflight를 실행합니다. 모델 ID·전체 revision SHA는 `pyproject.toml`의 `[tool.hb-steering.models]`에서 관리합니다. 사용자 요청으로 저장소의 `uv.lock`은 삭제했습니다. `uv sync`는 로컬 잠금 파일을 자동 생성할 수 있으나 Git에서는 제외합니다. GPU 실행 스크립트는 `uv run --no-sync`를 사용하므로 실행 전에 의존성을 설치해야 합니다. Linux GPU 빌드는 PyTorch 2.14.1+cu130이며 CUDA 13과 호환되는 드라이버가 필요합니다. A40 + 드라이버 570.195.03에서는 아래 CUDA forward compatibility 라이브러리로 실행을 확인했습니다. GPU 실행 스크립트는 R570 드라이버와 `/usr/local/cuda-13.0/compat/libcuda.so.1`이 함께 존재하면 해당 라이브러리를 프로세스에 적용합니다. R580 이상에서는 자동 적용하지 않습니다. `preflight`가 CUDA 사용 가능 여부를 확인합니다. [NVIDIA 호환성 표](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)
+
+현재 Ubuntu 24.04 컨테이너에는 NVIDIA 저장소의 `cuda-compat-13-0=580.178.04-1ubuntu1`을 설치했습니다. 다른 R570/A40 환경에서 동일한 설정을 준비할 때는 NVIDIA CUDA APT 저장소가 등록된 상태에서 다음을 실행합니다. 호스트 커널 드라이버를 교체하는 패키지가 아닙니다. [NVIDIA forward compatibility 안내](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)
+
+```sh
+apt-get update
+apt-get install --yes --no-install-recommends cuda-compat-13-0=580.178.04-1ubuntu1
+uv sync --extra gpu --extra dev
+./scripts/preflight --model model_1
+```
+
+호환 라이브러리 자동 적용은 `scripts/`의 GPU 실행 명령에 포함됩니다. Python을 직접 실행할 때는 별도로 적용합니다.
+
+```sh
+. ./scripts/cuda-compat-env
+uv run --no-sync --extra gpu python your_script.py
+```
 
 모델 계열과 담당자는 **Qwen: 민정·승민 (`model_1`), Llama: 재민·도윤 (`model_2`), Gemma: 세진·한비 (`model_3`)**로 정했습니다. 각 조가 내부·외부 3×3와 over-refusal 전체 평가를 맡고, 같은 모델/run ID는 한 번에 한 명만 실행합니다. 자세한 분담은 [팀 실험 가이드](docs/team-experiments.md)를 참고합니다.
 
-각 계열의 버전·파라미터 크기·정확한 checkpoint는 아직 지정하지 않았습니다. `configs/experiment.toml`의 `models.model_1`, `model_2`, `model_3`에 합의한 실제 Hugging Face ID를 입력합니다. 모델 ID를 추정해서 채우지 않습니다.
+모델 설정은 `pyproject.toml`의 `[tool.hb-steering.models]`에서 읽습니다. 데이터·생성·steering·judge 설정은 `configs/experiment.toml`에서 읽습니다. `model_1`은 아래 Qwen checkpoint로 고정했습니다. `model_2`, `model_3`는 합의한 실제 Hugging Face ID와 전체 revision SHA를 지정해야 합니다.
 
 ```toml
-[models.model_1]
-hf_id = "organization/model-name"
-revision = ""
+[tool.hb-steering.models.model_1]
+hf_id = "Qwen/Qwen2.5-7B-Instruct"
+revision = "a09a35458c702b33eeacc393d103063234e8bc28"
 dtype = "auto"
 ```
 
-필요한 모델 접근 권한을 받은 뒤 `HF_TOKEN`을 셸에 설정합니다. credential을 저장소에 commit하지 않습니다. `.env`는 자동 로딩하지 않으며 필요한 경우 명시적으로 `uv run --env-file .env ...`를 사용합니다. 기본 입력 형식은 tokenizer의 chat template입니다. template이 없는 base 모델은 해당 모델 설정에 `use_chat_template = false`를 지정합니다.
+필요한 모델 접근 권한을 받은 뒤 `HF_TOKEN`을 셸에 설정합니다. credential을 저장소에 commit하지 않습니다. `.env`는 자동 로딩하지 않으며 필요한 경우 명시적으로 `uv run --env-file .env ...`를 사용합니다. 현재 GPU 의존성에는 `hf-transfer`가 없어 GPU 실행 스크립트가 `HF_HUB_ENABLE_HF_TRANSFER=0`을 내부 설정하고 표준 다운로드를 사용합니다. 아래 명령에 별도 환경변수 접두어를 붙일 필요는 없습니다. 기본 입력 형식은 tokenizer의 chat template입니다. template이 없는 base 모델은 해당 모델 설정에 `use_chat_template = false`를 지정합니다.
 
 ```sh
 ./scripts/pin-models
@@ -178,7 +194,7 @@ Wilson 95% 구간은 문항 독립을 가정한 참고 구간입니다. 같은 �
 명령은 호출한 작업 디렉터리에 의존하지 않습니다. 인자는 각 스크립트의 `--help`를 확인합니다. 별도 설정은 전역 `--config`를 subcommand 앞에 둡니다.
 
 ```sh
-uv run --extra gpu hb-steering --root "$PWD" --config configs/experiment.toml \
+uv run --no-sync --extra gpu hb-steering --root "$PWD" --config configs/experiment.toml \
   run --model model_1 --run-id custom-001
 ```
 
@@ -216,14 +232,34 @@ outputs/<run_id>/
 
 원본 응답·개별 판정·기대 평가 수·완료 여부·규칙 provenance를 보존합니다. 같은 명령으로 재실행하면 검증된 완료 항목을 재사용하고 누락 항목을 재시도합니다. 설정·데이터·분할·한도·코드를 바꾼 결과를 같은 run ID로 덮어쓰지 않습니다. 같은 모델·run ID에 동시에 쓰는 실행은 파일 잠금으로 차단하므로 팀원 분담은 모델별로 합니다.
 
-Pod가 삭제되어도 결과를 잃지 않도록 저장소와 `outputs/`를 지속 볼륨에 두거나 직접 백업합니다. 원본 다운로드·모델 캐시·출력·credential·`.venv/`·`work/`는 Git에서 제외합니다. 소스·라벨·분할·설정·출처·테스트·`uv.lock`은 추적합니다.
+Pod가 삭제되어도 결과를 잃지 않도록 저장소와 `outputs/`를 지속 볼륨에 두거나 직접 백업합니다. 원본 다운로드·모델 캐시·출력·credential·`.venv/`·`work/`는 Git에서 제외합니다. 소스·라벨·분할·설정·출처·테스트는 추적합니다. `uv.lock`은 제외합니다. 잠금 파일이 없는 새 run은 설치 패키지 버전 목록과 pyproject.toml hash·snapshot을 기록합니다. 기존 run의 snapshot을 덮어쓰지 않으며 설정·환경 변경 후에는 새 run ID를 사용합니다.
 
 ## 코드 검증
 
 ```sh
-uv sync --frozen --extra gpu --extra dev
-uv run --extra gpu --extra dev pytest
-uv run --extra dev ruff check .
+uv sync --extra gpu --extra dev
+uv run --no-sync --extra gpu --extra dev pytest
+uv run --no-sync --extra dev ruff check .
 ```
 
 테스트는 CPU fixture로 데이터 분리·규칙 채점·집계·추출·개입·저장·재개를 검증합니다. 실제 target 모델의 GPU 호환성, VRAM, 전체 실행 성공은 각 모델의 preflight와 smoke로 별도 확인합니다.
+
+## Batch별 VRAM 측정
+
+실험 코드는 `configs/experiment.toml`의 `runtime.batch_size`를 사용하며 현재 값은 32입니다. 추출은 최대 32개 prompt의 activation을 계산하고 원래 문항 순서로 합산합니다. 생성은 baseline 또는 같은 source level·layer의 steering 조건끼리 묶어 최대 32개씩 처리합니다. 왼쪽 padding과 개별 attention mask를 사용하며 마지막 batch는 남은 문항 수만큼 처리합니다. OOM 발생 시 batch를 자동 축소하지 않습니다. 별도 진단 스크립트로 같은 안전한 합성 입력의 batch 1·2·4를 측정할 수 있습니다. 입력 목표 길이는 chat template 포함 512·2048 token이며 실제 길이를 결과에 기록합니다. 생성은 runtime.max_new_tokens만큼 강제로 진행해 조기 EOS로 비교 길이가 달라지는 것을 막습니다. 진단 스크립트는 실제 실험 설정을 변경하지 않습니다.
+
+```sh
+./scripts/benchmark-vram --model model_1 --run-id vram-model1-20261013-003
+```
+
+측정 결과는 `outputs/<run_id>/<model_key>/diagnostics/vram.json`에 원자 저장합니다. 입력·출력 길이를 줄여 OOM을 우회하지 않으며, 완료된 조건만 재개 시 건너뜁니다. peak allocated는 PyTorch가 실제 tensor에 사용한 메모리, peak reserved는 allocator가 확보한 메모리입니다. GPU 드라이버·CUDA context 및 다른 프로세스 메모리는 이 수치에 모두 포함되지 않으므로 실제 배치 한도의 보장값으로 사용하지 않습니다.
+
+### 명령에서 batch size 지정
+
+`./scripts/run`은 기본으로 batch 32를 전달합니다. 명령 끝의 `--batch-size`로 변경할 수 있으며 유효 설정과 run fingerprint에 반영합니다. 같은 run ID를 재개할 때는 같은 batch size를 지정해야 합니다. extract·generate·score·summarize·transfer·smoke에서도 이 옵션을 사용할 수 있습니다.
+
+```sh
+./scripts/run --model model_1 --run-id full-model1-batch32-20261013-001 --batch-size 32
+```
+
+이 명령은 제한 없이 전체 5-fold OOF와 활성화된 외부·safe 평가의 추출·생성·rule 판정·집계를 실행합니다. 다른 batch를 쓰려면 새 run ID와 원하는 `--batch-size`를 지정합니다.

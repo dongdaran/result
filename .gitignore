@@ -1,4 +1,4 @@
-/outputs/
+
 /data/raw/
 /data/processed/
 /.venv/
@@ -15,3 +15,6 @@ __pycache__/
 build/
 dist/
 .DS_Store
+
+# uv sync may generate a local lock; the user requested no tracked lock.
+/uv.lock

@@ -528,3 +528,30 @@ def test_safe_only_transfer_and_limited_fit_are_explicit(project_factory, monkey
     report = experiment.summarize_transfer(transfer)
     assert report["cells"] == [] and len(report["over_refusal_cells"]) == 4
     assert report["full_transfer"] is False and report["limit_per_level"] == 1
+
+
+def test_lockless_run_snapshots_project_and_rejects_dependency_changes(project_factory, monkeypatch):
+    project = project_factory()
+    (project["root"] / "uv.lock").unlink()
+    project_file = project["root"] / "pyproject.toml"
+    project_file.write_text('[project]\nname = "fixture"\n')
+
+    class Distribution:
+        metadata = {"Name": "fixture-dependency"}
+        version = "1.0"
+
+    monkeypatch.setattr(experiment.metadata, "distributions", lambda: [Distribution()])
+    project["setup"]()
+    output = project["root"] / "outputs/test-oof"
+    saved = json.loads((output / "manifest.json").read_text())
+    assert saved["dependency_lock_sha256"] is None
+    assert saved["installed_dependencies"] == {"fixture-dependency": "1.0"}
+    assert (output / "pyproject.toml").read_bytes() == project_file.read_bytes()
+    project["setup"]()
+    Distribution.version = "2.0"
+    with pytest.raises(ValueError, match="new --run-id"):
+        project["setup"]()
+    Distribution.version = "1.0"
+    project_file.write_text(project_file.read_text() + "# changed\n")
+    with pytest.raises(ValueError, match="new --run-id"):
+        project["setup"]()

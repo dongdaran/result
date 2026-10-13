@@ -16,13 +16,14 @@ def project(tmp_path):
     (tmp_path / "configs").mkdir()
     text = (root / "configs/experiment.toml").read_text()
     (tmp_path / "configs/experiment.toml").write_text(text)
+    (tmp_path / "pyproject.toml").write_text((root / "pyproject.toml").read_text())
     return tmp_path
 
 
 def test_unselected_model_fails_before_loading_weights(project, capsys):
     with patch.object(models, "HFRunner", side_effect=AssertionError("Must not load a model")):
-        assert cli.main(["--root", str(project), "run", "--model", "model_1", "--run-id", "x"]) == 2
-    assert "Set models.model_1.hf_id" in capsys.readouterr().err
+        assert cli.main(["--root", str(project), "run", "--model", "model_2", "--run-id", "x"]) == 2
+    assert "Set models.model_2.hf_id" in capsys.readouterr().err
 
 
 def test_download_and_check_use_stdlib_pipeline(project, capsys):
@@ -42,8 +43,9 @@ def test_download_and_check_use_stdlib_pipeline(project, capsys):
 
 def test_pin_models_preserves_comments_and_skips_existing_pins(project):
     config, path = load_config(project)
-    text = path.read_text().replace('hf_id = ""', 'hf_id = "example/model"', 1)
-    path.write_text(text)
+    model_path = project / "pyproject.toml"
+    text = model_path.read_text().replace('hf_id = ""', 'hf_id = "example/model"', 1)
+    model_path.write_text(text)
     config, path = load_config(project)
     revision = "a" * 40
     with patch.object(
@@ -54,16 +56,17 @@ def test_pin_models_preserves_comments_and_skips_existing_pins(project):
         cli.pin_models(config, path)
         assert request.call_count == 1  # Rule evaluation does not resolve a judge model.
     pinned, _ = load_config(project)
-    assert pinned["models"]["model_1"]["revision"] == revision
-    assert "# Fill these later." in path.read_text()
+    assert pinned["models"]["model_2"]["revision"] == revision
+    assert "# A full commit SHA" in model_path.read_text()
     with patch.object(cli.urllib.request, "urlopen", side_effect=AssertionError("Already pinned")):
         cli.pin_models(pinned, path)
 
 
 def test_pin_models_has_no_partial_write_on_remote_failure(project):
     config, path = load_config(project)
-    text = path.read_text().replace('hf_id = ""', 'hf_id = "example/model"', 2)
-    path.write_text(text)
+    model_path = project / "pyproject.toml"
+    text = model_path.read_text().replace('hf_id = ""', 'hf_id = "example/model"', 2)
+    model_path.write_text(text)
     config, path = load_config(project)
     with patch.object(
         cli.urllib.request,
@@ -72,7 +75,7 @@ def test_pin_models_has_no_partial_write_on_remote_failure(project):
     ):
         with pytest.raises(OSError):
             cli.pin_models(config, path)
-    assert path.read_text() == text
+    assert model_path.read_text() == text
 
 
 def configured(project):
@@ -278,3 +281,29 @@ def test_transfer_command_runs_only_final_context(project):
         assert cli.main(["--root", str(project), "transfer", "--model", "model_1", "--run-id", "x"]) == 0
     assert cli._selected_runs(target.call_args.args[0]) == [transfer]
     assert cli._selected_runs(score.call_args.args[0]) == [transfer]
+
+
+@pytest.mark.parametrize("size", [8, 32])
+def test_batch_size_override_reaches_effective_run_config(project, size):
+    with patch.object(experiment, "setup_run", return_value={"directory": project / "outputs/x"}) as setup, patch.object(cli, "_run_target_folds"):
+        assert cli.main([
+            "--root", str(project), "extract", "--model", "model_1", "--run-id", "x",
+            "--batch-size", str(size),
+        ]) == 0
+    assert setup.call_args.args[1]["runtime"]["batch_size"] == size
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "true"])
+def test_batch_size_cli_rejects_invalid_values(value):
+    with pytest.raises(SystemExit):
+        cli.parser().parse_args([
+            "run", "--model", "model_1", "--run-id", "x", "--batch-size", value,
+        ])
+
+
+def test_run_wrapper_default_batch_can_be_overridden():
+    args = cli.parser().parse_args([
+        "run", "--batch-size", "32", "--model", "model_1", "--run-id", "x",
+        "--batch-size", "16",
+    ])
+    assert args.batch_size == 16

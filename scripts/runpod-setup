@@ -8,5 +8,5 @@ if ! command -v uv >/dev/null 2>&1; then
     printf '%s\n' 'uv was installed but is not on PATH. Add its executable directory to PATH and rerun.' >&2
     exit 1
 fi
-uv sync --project "$ROOT" --frozen --extra gpu --extra dev
+uv sync --project "$ROOT" --extra gpu --extra dev
 exec "$ROOT/scripts/preflight"

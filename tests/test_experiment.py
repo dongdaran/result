@@ -300,3 +300,26 @@ def test_resolved_vector_layers_must_match_the_loaded_decoder(run):
     path.with_suffix(".json").unlink()
     with pytest.raises(ValueError, match="Resolved vector layers"):
         experiment.extract(run, FakeRunner())
+
+
+def test_batched_generation_groups_conditions_and_resumes_missing_chunks(run):
+    run["config"]["runtime"]["batch_size"] = 2
+
+    class BatchRunner(FakeRunner):
+        def generate_batch(self, prompts, steering=None):
+            return [self.generate(prompt, steering) for prompt in prompts]
+
+    runner = BatchRunner(fail_once={"baseline:eval1a"})
+    experiment.extract(run, runner)
+    with pytest.raises(RuntimeError, match="2 generation jobs failed"):
+        experiment.generate(run, runner)
+    path = run["directory"] / "generations/responses.jsonl"
+    existing = read_journal(path)
+    assert len(existing) == 22
+    assert "baseline:eval1a" not in existing and "baseline:eval1b" not in existing
+    before = runner.calls.copy()
+    result = experiment.generate(run, runner)
+    assert len(result) == 24
+    for key in existing:
+        assert runner.calls[key] == before[key]
+    assert len(read_journal(run["directory"] / "logs/errors.jsonl")) == 2

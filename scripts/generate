@@ -1,4 +1,5 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-exec uv run --project "$ROOT" --extra gpu hb-steering --root "$ROOT" generate "$@"
+. "$ROOT/scripts/cuda-compat-env"
+exec uv run --no-sync --project "$ROOT" --extra gpu hb-steering --root "$ROOT" generate "$@"

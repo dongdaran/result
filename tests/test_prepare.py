@@ -305,10 +305,18 @@ class PrepareTests(unittest.TestCase):
         template = Path(__file__).resolve().parents[1] / "configs/experiment.toml"
         path = self.root / "config.toml"
         text = template.read_text()
+        (self.root / "pyproject.toml").write_text(
+            (template.parents[1] / "pyproject.toml").read_text()
+        )
         path.write_text(text)
         config, resolved = load_config(self.root, "config.toml")
         self.assertEqual(resolved, path)
-        self.assertEqual(config["models"]["model_1"]["hf_id"], "")
+        self.assertEqual(config["models"]["model_1"]["hf_id"], "Qwen/Qwen2.5-7B-Instruct")
+        self.assertEqual(
+            config["models"]["model_1"]["revision"],
+            "a09a35458c702b33eeacc393d103063234e8bc28",
+        )
+        self.assertEqual(config["models"]["model_2"]["hf_id"], "")
         self.assertEqual(config["dataset"]["n_folds"], 5)
         self.assertEqual(config["dataset"]["benign_ratios"], [0.6, 0.2, 0.2])
         for value in ("true", "1", "11", "5.0"):

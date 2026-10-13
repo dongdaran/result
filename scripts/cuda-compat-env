@@ -1,0 +1,15 @@
+# The reference lock excludes hf-transfer; GPU wrappers use standard HF downloads.
+export HF_HUB_ENABLE_HF_TRANSFER=0
+
+# Source from GPU wrappers after ROOT is resolved.
+# Only the tested R570 / CUDA 13 compatibility combination is enabled.
+if [ -f /usr/local/cuda-13.0/compat/libcuda.so.1 ] && command -v nvidia-smi >/dev/null 2>&1; then
+    HB_DRIVER_VERSIONS=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader)
+    case "$HB_DRIVER_VERSIONS" in
+        570.*)
+            export LD_LIBRARY_PATH="/usr/local/cuda-13.0/compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            export HB_CUDA_COMPAT_DIR=/usr/local/cuda-13.0/compat
+            ;;
+    esac
+    unset HB_DRIVER_VERSIONS
+fi

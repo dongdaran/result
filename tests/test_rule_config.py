@@ -11,6 +11,7 @@ def configured(tmp_path):
     target = tmp_path / "configs/experiment.toml"
     target.parent.mkdir()
     target.write_text(source.read_text())
+    (tmp_path / "pyproject.toml").write_text((source.parents[1] / "pyproject.toml").read_text())
     return tmp_path, target
 
 
@@ -108,8 +109,36 @@ def test_legacy_config_may_omit_new_evaluation_sections(configured):
     classifier_config(path)
     text = path.read_text()
     beginning, remainder = text.split("[evaluation]", 1)
-    _, models = remainder.split("[models.model_1]", 1)
-    path.write_text(beginning + "[models.model_1]" + models)
+    _, runtime = remainder.split("[runtime]", 1)
+    path.write_text(beginning + "[runtime]" + runtime)
     config, _ = load_config(root)
     assert "evaluation" not in config and "external" not in config
     assert require_judge(config)["revision"] == "a" * 40
+
+
+def test_target_models_come_from_pyproject_and_duplicate_source_is_rejected(configured):
+    root, path = configured
+    config, _ = load_config(root)
+    assert config["models"]["model_1"]["hf_id"] == "Qwen/Qwen2.5-7B-Instruct"
+    project = root / "pyproject.toml"
+    project.write_text(project.read_text().replace("Qwen/Qwen2.5-7B-Instruct", "fixture/model"))
+    config, _ = load_config(root)
+    assert config["models"]["model_1"]["hf_id"] == "fixture/model"
+    path.write_text(path.read_text() + '\n[models.model_1]\nhf_id = "duplicate/model"\n')
+    with pytest.raises(ValueError, match="Move target models"):
+        load_config(root)
+
+
+def test_missing_pyproject_model_table_fails(configured):
+    root, _ = configured
+    (root / "pyproject.toml").write_text('[project]\nname = "fixture"\n')
+    with pytest.raises(ValueError, match="Missing pyproject.toml"):
+        load_config(root)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "true", "1.5"])
+def test_invalid_runtime_batch_size_fails(configured, value):
+    root, path = configured
+    path.write_text(path.read_text().replace("batch_size = 32", "batch_size = " + value))
+    with pytest.raises(ValueError, match="runtime.batch_size"):
+        load_config(root)

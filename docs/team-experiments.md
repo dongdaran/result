@@ -35,7 +35,7 @@ HarmBench와 외부 레벨은 프로젝트의 AI 초기 라벨입니다. 평가 
 
 ## 팀원별 실행 명령
 
-저장소를 clone한 뒤 팀에서 합의한 commit을 사용합니다. `configs/experiment.toml`에 세 모델 ID와 고정 revision을 공유해 두고 자신의 모델 key만 명령에서 바꿉니다. 아래는 Qwen 조(민정·승민)의 예시입니다. Llama 조는 `model_2`, Gemma 조는 `model_3`를 사용합니다.
+저장소를 clone한 뒤 팀에서 합의한 commit을 사용합니다. `pyproject.toml`의 `[tool.hb-steering.models]`에 세 모델 ID와 고정 revision을 공유해 두고 자신의 모델 key만 명령에서 바꿉니다. 아래는 Qwen 조(민정·승민)의 예시입니다. Llama 조는 `model_2`, Gemma 조는 `model_3`를 사용합니다.
 
 ```sh
 ./scripts/runpod-setup

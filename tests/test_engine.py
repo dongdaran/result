@@ -281,3 +281,44 @@ def test_model_placeholders_and_layer_indices_fail_before_loading():
     assert resolve_layer_index(-1, 4) == 3
     with pytest.raises(ValueError, match="outside"):
         resolve_layer_index(-5, 4)
+
+
+def test_batched_extraction_matches_unpadded_single_means_and_short_final_batch(runner, torch):
+    prompts = ["hello", "hello safe test", "safe test"] * 3
+    runner.batch_size = 1
+    singles = runner.activation_means(prompts, [-1])
+    runner.batch_size = 4
+    batched = runner.activation_means(prompts, [-1])
+    torch.testing.assert_close(batched[1], singles[1], atol=1e-6, rtol=1e-5)
+    assert all(not block._forward_hooks for block in runner.layers)
+
+
+def test_batched_generation_removes_full_padded_prompt_and_preserves_order(runner, torch, monkeypatch):
+    runner.batch_size = 32
+
+    def generate(**kwargs):
+        ids = kwargs["input_ids"]
+        mask = kwargs["attention_mask"]
+        assert ids.shape[0] == 2
+        assert mask[0, 0].item() == 0
+        tail = torch.tensor([[7, 2], [8, 2]], device=ids.device)
+        return torch.cat([ids, tail], dim=1)
+
+    monkeypatch.setattr(runner.model, "generate", generate)
+    steering = {"layer": -1, "vector": torch.ones(8), "coefficient": 0.2}
+    assert runner.generate_batch(["hello", "hello safe test"], steering) == ["safe", "unsafe"]
+    assert all(not block._forward_hooks for block in runner.layers)
+    with pytest.raises(ValueError, match="no truncation"):
+        runner.generate_batch(["hello", "hello " * 40])
+
+
+def test_batched_extraction_removes_hooks_on_forward_error(runner, monkeypatch):
+    runner.batch_size = 32
+
+    def fail(**kwargs):
+        raise RuntimeError("intentional batch failure")
+
+    monkeypatch.setattr(runner.model, "forward", fail)
+    with pytest.raises(RuntimeError, match="intentional batch failure"):
+        runner.activation_means(["hello", "hello safe"], [-1])
+    assert all(not block._forward_hooks for block in runner.layers)

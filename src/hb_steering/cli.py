@@ -16,9 +16,13 @@ from .prepare import prepare_dataset, read_prepared
 from .storage import atomic_bytes, read_journal, run_lock
 
 
-def pin_models(config: dict, config_path: Path, *, refresh: bool = False) -> None:
-    text = config_path.read_text()
-    entries = [(f"models.{key}", value) for key, value in config["models"].items()]
+def pin_models(
+    config: dict, config_path: Path, *, refresh: bool = False, model_path: Path | None = None
+) -> None:
+    model_path = model_path or config_path.parent.parent / "pyproject.toml"
+    entries = [(f"tool.hb-steering.models.{key}", value) for key, value in config["models"].items()]
+    text = model_path.read_text()
+    judge_text = config_path.read_text()
     if config["judge"].get("method") != "rule":
         entries.append(("judge", config["judge"]))
     replacements = {}
@@ -42,9 +46,12 @@ def pin_models(config: dict, config_path: Path, *, refresh: bool = False) -> Non
         if not COMMIT.fullmatch(revision):
             raise ValueError(f"Invalid HF revision returned for {section}")
         replacements[section] = revision
+    changed_model = changed_judge = False
     for section, revision in replacements.items():
+        is_judge = section == "judge"
+        current = judge_text if is_judge else text
         pattern = rf"(?ms)(^\[{re.escape(section)}\]\s*\n)(.*?)(?=^\[|\Z)"
-        match = re.search(pattern, text)
+        match = re.search(pattern, current)
         if not match:
             raise ValueError(f"Missing TOML section: {section}")
         body, count = re.subn(
@@ -52,11 +59,19 @@ def pin_models(config: dict, config_path: Path, *, refresh: bool = False) -> Non
         )
         if count != 1:
             raise ValueError(f"Expected a revision string in {section}")
-        text = text[: match.start(2)] + body + text[match.end(2) :]
+        updated = current[: match.start(2)] + body + current[match.end(2) :]
+        if is_judge:
+            judge_text = updated
+            changed_judge = True
+        else:
+            text = updated
+            changed_model = True
         print(f"{section}: pinned {revision}")
     # All remote resolutions succeeded before mutating the user's config.
-    if replacements:
-        atomic_bytes(config_path, text.encode())
+    if changed_model:
+        atomic_bytes(model_path, text.encode())
+    if changed_judge:
+        atomic_bytes(config_path, judge_text.encode())
 
 
 def preflight(config: dict, model_key: str | None = None) -> bool:
@@ -64,7 +79,7 @@ def preflight(config: dict, model_key: str | None = None) -> bool:
         import torch
         import transformers
     except ImportError as exc:
-        raise RuntimeError("Install GPU dependencies: uv sync --frozen --extra gpu") from exc
+        raise RuntimeError("Install GPU dependencies: uv sync --extra gpu") from exc
     device = config["runtime"]["device"]
     report = {
         "torch": torch.__version__,
@@ -172,6 +187,13 @@ def _selected_runs(run: dict) -> list[dict]:
     return contexts
 
 
+def _batch_size(value: str) -> int:
+    size = int(value)
+    if size <= 0:
+        raise argparse.ArgumentTypeError("batch size must be a positive integer")
+    return size
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Level-wise HarmBench steering experiments")
     result.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
@@ -197,6 +219,10 @@ def parser() -> argparse.ArgumentParser:
         else:
             command.set_defaults(fold=None)
         command.add_argument("--limit-per-level", type=int)
+        command.add_argument(
+            "--batch-size", type=_batch_size,
+            help="Override runtime.batch_size; saved in the effective run configuration",
+        )
     return result
 
 
@@ -238,13 +264,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "pin-models":
-            pin_models(config, config_path, refresh=args.refresh)
+            pin_models(config, config_path, refresh=args.refresh, model_path=root / "pyproject.toml")
             return 0
         if args.command == "preflight":
             return 0 if preflight(config, args.model) else 2
 
         from .experiment import setup_run, summarize, summarize_oof, summarize_transfer
 
+        if args.batch_size is not None:
+            config = copy.deepcopy(config)
+            config["runtime"]["batch_size"] = args.batch_size
         require_model(config, args.model)
         if args.command in {"run", "score", "transfer"}:
             require_judge(config)

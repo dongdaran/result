@@ -5,6 +5,7 @@ import io
 import json
 import platform
 import uuid
+from importlib import metadata
 from pathlib import Path
 
 from .config import require_judge, require_model, safe_name
@@ -114,6 +115,14 @@ def setup_run(
         "dependency_lock_sha256": file_digest(root / "uv.lock")
         if (root / "uv.lock").exists()
         else None,
+        "pyproject_sha256": file_digest(root / "pyproject.toml")
+        if (root / "pyproject.toml").exists()
+        else None,
+        "installed_dependencies": {
+            distribution.metadata["Name"]: distribution.version
+            for distribution in metadata.distributions()
+            if distribution.metadata["Name"]
+        } if not (root / "uv.lock").exists() else None,
         "limit_per_level": limit,
         "external_identity": external_identity,
     }
@@ -130,6 +139,8 @@ def setup_run(
         else:
             atomic_json(path, run_spec)
             atomic_bytes(directory / "config.toml", config_path.read_bytes())
+            if (root / "pyproject.toml").exists():
+                atomic_bytes(directory / "pyproject.toml", (root / "pyproject.toml").read_bytes())
             atomic_json(directory / "effective_config.json", config)
             atomic_json(directory / "code_hashes.json", code)
     model_fingerprint = fingerprint({**run_spec, "model_key": model_key})
@@ -385,36 +396,50 @@ def generate(run: dict, runner=None) -> dict:
         _environment(runner, run["directory"] / "logs/target_environment.json")
         vectors = _load_vectors(run, runner)
         behavior_map = {r["behavior_id"]: r for r in run["records"]}
-        for index, job in enumerate(pending, 1):
+        batch_size = run["config"]["runtime"].get("batch_size", 1)
+        groups = {}
+        for job in pending:
+            groups.setdefault((job["source_level"], job["layer"]), []).append(job)
+        for (source, layer), jobs in groups.items():
             steering = None
-            if job["source_level"]:
-                resolved = resolve_layer_index(job["layer"], len(runner.layers))
+            if source:
+                resolved = resolve_layer_index(layer, len(runner.layers))
                 steering = {
                     "layer": resolved,
-                    "vector": vectors["vectors"][job["source_level"]][resolved],
+                    "vector": vectors["vectors"][source][resolved],
                     "coefficient": run["config"]["steering"]["coefficient"],
                     "normalize": False,
-                }  # Already normalized at extraction if configured.
-            try:
-                text = runner.generate(behavior_prompt(behavior_map[job["behavior_id"]]), steering)
-                if not isinstance(text, str) or not text.strip():
-                    raise ValueError("Generation did not return nonempty text")
-                row = {
-                    **job,
-                    "run_fingerprint": run["fingerprint"],
-                    "generation": text,
-                    "generation_sha256": fingerprint(text),
                 }
-                append_record(path, row)
-                existing[job["key"]] = row
-            except (ValueError, RuntimeError) as exc:
-                _log_error(run, "generate", job["key"], exc)
-                failed += 1
-                if "out of memory" in str(exc).casefold():
-                    raise RuntimeError(
-                        "GPU out of memory; inspect logs and use a new run with smaller settings"
-                    ) from exc
-            if index % 10 == 0 or index == len(pending):
+            for start in range(0, len(jobs), batch_size):
+                chunk = jobs[start : start + batch_size]
+                try:
+                    prompts = [behavior_prompt(behavior_map[j["behavior_id"]]) for j in chunk]
+                    texts = (
+                        [runner.generate(prompts[0], steering)] if batch_size == 1
+                        else runner.generate_batch(prompts, steering)
+                    )
+                    if not isinstance(texts, list) or len(texts) != len(chunk):
+                        raise ValueError("Generation output count differs from batch job count")
+                    if any(not isinstance(text, str) or not text.strip() for text in texts):
+                        raise ValueError("Generation did not return nonempty text")
+                except (ValueError, RuntimeError) as exc:
+                    for job in chunk:
+                        _log_error(run, "generate", job["key"], exc)
+                    failed += len(chunk)
+                    if "out of memory" in str(exc).casefold():
+                        raise RuntimeError(
+                            "GPU out of memory; inspect logs and use a new run with smaller settings"
+                        ) from exc
+                    continue
+                for job, text in zip(chunk, texts, strict=True):
+                    row = {
+                        **job,
+                        "run_fingerprint": run["fingerprint"],
+                        "generation": text,
+                        "generation_sha256": fingerprint(text),
+                    }
+                    append_record(path, row)
+                    existing[job["key"]] = row
                 print(f"Generation progress: {len(existing)}/{len(planned)}", flush=True)
     finally:
         if owned:

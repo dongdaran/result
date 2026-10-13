@@ -1,0 +1,72 @@
+{
+  "spec": {
+    "model": {
+      "hf_id": "Qwen/Qwen2.5-7B-Instruct",
+      "revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+      "dtype": "auto"
+    },
+    "runtime": {
+      "batch_size": 32,
+      "device": "cuda",
+      "max_input_tokens": 4096,
+      "max_new_tokens": 512,
+      "do_sample": false,
+      "seed": 42
+    },
+    "torch": "2.14.1+cu130",
+    "transformers": "4.57.6",
+    "cuda": "13.0",
+    "batch_sizes": [
+      32
+    ],
+    "input_targets": [
+      2048
+    ],
+    "generation_tokens": 512,
+    "extraction_repeats": 3,
+    "generation_repeats": 1,
+    "synthetic_input": "Explain a peaceful landscape. blue sky blue sky blue sky blue sky blue sky blue sky blue sky blue sky ",
+    "generation_forces_length": true,
+    "input_length_selection": "binary_search_chat_token_count_v1"
+  },
+  "rows": [
+    {
+      "key": "extract_forward:2048:32",
+      "mode": "extract_forward",
+      "batch": 32,
+      "input_tokens": 2048,
+      "target_input_tokens": 2048,
+      "prompt_repeats": 1006,
+      "baseline_allocated_gib": 14.235148906707764,
+      "new_tokens": 0,
+      "status": "ok",
+      "peak_allocated_gib": 33.23612594604492,
+      "peak_reserved_gib": 42.921875,
+      "seconds": 30.122000655159354,
+      "incremental_allocated_gib": 19.000977039337158
+    },
+    {
+      "key": "generate:2048:32",
+      "mode": "generate",
+      "batch": 32,
+      "input_tokens": 2048,
+      "target_input_tokens": 2048,
+      "prompt_repeats": 1006,
+      "baseline_allocated_gib": 14.235149383544922,
+      "new_tokens": 512,
+      "status": "ok",
+      "peak_allocated_gib": 26.455869674682617,
+      "peak_reserved_gib": 27.6875,
+      "seconds": 38.48580470867455,
+      "incremental_allocated_gib": 12.220720291137695
+    }
+  ],
+  "complete": true,
+  "environment": {
+    "gpu": "NVIDIA A40",
+    "dtype": "bfloat16",
+    "attention_implementation": "sdpa",
+    "model_allocated_gib": 14.227183818817139,
+    "total_vram_gib": 44.431640625
+  }
+}

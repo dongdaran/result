@@ -44,7 +44,7 @@ def _positive_int(value, name):
 
 
 class HFRunner:
-    """Load one immutable model revision onto one device; run one prompt at a time.
+    """Load one immutable model revision onto one device; process explicitly configured prompt batches.
 
     ``activation_means`` and ``generate`` share the exact tokenizer/chat path.
     Activations are decoder BLOCK OUTPUT (not post-final-norm hidden states),
@@ -56,6 +56,7 @@ class HFRunner:
         self.revision = str(model_config.get("revision") or "").strip()
         if not self.hf_id or not self.revision:
             raise ValueError("Set a nonempty hf_id and pinned revision before loading a model.")
+        self.batch_size = _positive_int(runtime_config.get("batch_size", 1), "batch_size")
         self.max_input_tokens = _positive_int(
             runtime_config.get("max_input_tokens", 2048), "max_input_tokens"
         )
@@ -151,26 +152,35 @@ class HFRunner:
         self._closed = False
 
     def _encode_prompt(self, prompt: str):
+        return self._encode_prompts([prompt])
+
+    def _encode_prompts(self, prompts: list[str]):
         if self._closed:
             raise RuntimeError("HFRunner has been closed.")
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("Prompt must be a nonempty string.")
-        text = prompt
-        if self.use_chat_template:
-            messages = []
-            if self.system_prompt:
-                messages.append({"role": "system", "content": self.system_prompt})
-            messages.append({"role": "user", "content": prompt})
-            text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+        if not prompts or len(prompts) > self.batch_size:
+            raise ValueError("Prompt batch must be nonempty and no larger than batch_size.")
+        texts = []
+        for prompt in prompts:
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError("Prompt must be a nonempty string.")
+            text = prompt
+            if self.use_chat_template:
+                messages = []
+                if self.system_prompt:
+                    messages.append({"role": "system", "content": self.system_prompt})
+                messages.append({"role": "user", "content": prompt})
+                text = self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            texts.append(text)
+        self.tokenizer.padding_side = "left"
+        if self.tokenizer.pad_token_id is None:
+            if self.tokenizer.eos_token_id is None:
+                raise ValueError("Tokenizer needs a pad_token_id or eos_token_id for batching.")
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         inputs = self.tokenizer(
-            text,
-            return_tensors="pt",
-            add_special_tokens=not self.use_chat_template,
-            truncation=False,
-            padding=False,
-            return_attention_mask=True,
+            texts, return_tensors="pt", add_special_tokens=not self.use_chat_template,
+            truncation=False, padding=True, return_attention_mask=True,
             return_token_type_ids=False,
         )
         token_count = inputs["input_ids"].shape[1]
@@ -194,8 +204,11 @@ class HFRunner:
                 "Select at least one layer; duplicate resolved layers are not allowed."
             )
         totals = {index: torch.zeros(self.hidden_size, dtype=torch.float32) for index in selected}
-        for prompt in prompts:
-            inputs = self._encode_prompt(prompt)
+        for start in range(0, len(prompts), self.batch_size):
+            batch = prompts[start : start + self.batch_size]
+            inputs = self._encode_prompts(batch)
+            position_ids = inputs["attention_mask"].long().cumsum(-1) - 1
+            position_ids.masked_fill_(inputs["attention_mask"] == 0, 0)
             positions = last_token_positions(inputs["attention_mask"])
             captured = {}
 
@@ -211,11 +224,11 @@ class HFRunner:
                         .to(device="cpu", dtype=torch.float32)
                     )
                     if (
-                        values.shape != (1, self.hidden_size)
+                        values.shape != (len(batch), self.hidden_size)
                         or not torch.isfinite(values).all().item()
                     ):
                         raise ValueError("Invalid or nonfinite extracted prompt activation.")
-                    captured[index] = values[0]
+                    captured[index] = values
 
                 return hook
 
@@ -224,16 +237,20 @@ class HFRunner:
                     handle = self.layers[index].register_forward_hook(capture(index))
                     stack.callback(handle.remove)
                 with torch.inference_mode():
-                    self.model(**inputs, use_cache=False)
+                    self.model(**inputs, position_ids=position_ids, use_cache=False)
             if set(captured) != set(selected):
                 raise RuntimeError("One or more requested decoder blocks were not called.")
             for index in selected:
-                totals[index] += captured[index]
+                for value in captured[index]:
+                    totals[index] += value
         return {index: value / len(prompts) for index, value in totals.items()}
 
     def generate(self, prompt: str, steering: dict | None = None) -> str:
+        return self.generate_batch([prompt], steering)[0]
+
+    def generate_batch(self, prompts: list[str], steering: dict | None = None) -> list[str]:
         torch = self._torch
-        inputs = self._encode_prompt(prompt)
+        inputs = self._encode_prompts(prompts)
         prompt_length = inputs["input_ids"].shape[1]
         if (
             isinstance(self._context_window, int)
@@ -277,7 +294,9 @@ class HFRunner:
                 pad_token_id=pad_id,
                 use_cache=True,
             )
-        return self.tokenizer.decode(output[0, prompt_length:], skip_special_tokens=True)
+        if output.ndim != 2 or output.shape[0] != len(prompts):
+            raise ValueError("Generation output does not match prompt batch.")
+        return self.tokenizer.batch_decode(output[:, prompt_length:], skip_special_tokens=True)
 
     def close(self):
         """Release model tensors before loading another model or the judge."""
